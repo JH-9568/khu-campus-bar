@@ -9,5 +9,7 @@ app="build/CampusBar.app"
 mkdir -p "$app/Contents/MacOS"
 cp .build/release/CampusBar "$app/Contents/MacOS/CampusBar"
 cp Info.plist "$app/Contents/Info.plist"
+swift -module-cache-path "$CLANG_MODULE_CACHE_PATH" scripts/build-icons.swift
+iconutil -c icns .build/CampusBar.iconset -o "$app/Contents/Resources/CampusBar.icns"
 codesign --force --sign - "$app"
 printf 'Built %s\n' "$app"

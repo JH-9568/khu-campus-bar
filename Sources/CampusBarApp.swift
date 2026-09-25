@@ -160,7 +160,15 @@ struct CampusBarApp: App {
         MenuBarExtra {
             MenuContent(store: store)
         } label: {
-            Label(store.menuTitle, systemImage: "books.vertical")
+            Label {
+                Text(store.menuTitle)
+            } icon: {
+                Image(nsImage: NSImage(named: "MenuIcon") ?? NSImage(systemSymbolName: "books.vertical", accessibilityDescription: nil)!)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 22, height: 15)
+            }
         }
         .menuBarExtraStyle(.window)
     }
