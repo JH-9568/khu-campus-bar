@@ -3,9 +3,12 @@ enum CampusScripts {
     (async () => {
       try {
         const get = async path => {
-          const response = await fetch(path, {credentials: 'same-origin'});
-          if (!response.ok) throw new Error(`Canvas API ${response.status}`);
-          return await response.json();
+          const response = await fetch(path, {
+            credentials: 'same-origin', headers: {Accept: 'application/json'}
+          });
+          if (!response.ok) throw new Error(`Canvas API ${response.status}: ${path.split('?')[0]}`);
+          const body = await response.text();
+          return JSON.parse(body.replace(/^\s*while\(1\);/, ''));
         };
         const courses = await get('/api/v1/courses?enrollment_state=active&per_page=100');
         if (!Array.isArray(courses)) throw new Error('과목 목록을 읽지 못했습니다');
@@ -67,7 +70,7 @@ enum CampusScripts {
           window.webkit.messageHandlers.learningX.postMessage(json);
         }
       };
-      const observer = new MutationObserver(() => requestAnimationFrame(scan));
+      const observer = new MutationObserver(scan);
       observer.observe(document.documentElement, {childList: true, subtree: true, characterData: true});
       scan();
     })();
