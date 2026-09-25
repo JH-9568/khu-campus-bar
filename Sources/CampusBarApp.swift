@@ -2,19 +2,6 @@ import AppKit
 import SwiftUI
 import WebKit
 
-@MainActor
-final class CampusStore: ObservableObject {
-    @Published var status = "e-Campus에 로그인해 주세요"
-    let webView: WKWebView
-
-    init() {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/index.php")!))
-    }
-}
-
 struct LoginView: NSViewRepresentable {
     let webView: WKWebView
 
@@ -27,19 +14,76 @@ struct MenuContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("이번 주 강의실")
-                .font(.headline)
-            Text(store.status)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("이번 주 강의실").font(.headline)
+                Spacer()
+                Button { store.refresh() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("새로고침")
+            }
+
+            if store.items.isEmpty {
+                Text(store.status).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
+            } else {
+                ForEach(store.dueItems.prefix(8)) { item in
+                    itemRow(item)
+                }
+                if !store.announcementItems.isEmpty {
+                    Divider()
+                    Text("최근 공지").font(.subheadline.bold())
+                    ForEach(store.announcementItems.prefix(3)) { item in
+                        itemRow(item)
+                    }
+                }
+                Text(store.status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Divider()
-            Button("e-Campus 로그인") { openWindow(id: "login") }
-            Button("강의실 열기") {
-                NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!)
+            HStack {
+                Button("e-Campus 로그인") { openWindow(id: "login") }
+                Spacer()
+                Button("강의실 열기") {
+                    NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!)
+                }
             }
         }
-        .padding(18)
-        .frame(width: 320, alignment: .leading)
+        .padding(16)
+        .frame(width: 350, alignment: .leading)
+        .onAppear { store.refreshIfNeeded() }
+    }
+
+    private func itemRow(_ item: CampusItem) -> some View {
+        Button {
+            if let url = URL(string: item.url), url.host == "khcanvas.khu.ac.kr" {
+                NSWorkspace.shared.open(url)
+            }
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: item.kind.symbol)
+                    .foregroundStyle(item.kind == .announcement ? .blue : .orange)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title).lineLimit(2)
+                    HStack {
+                        Text(item.course).lineLimit(1)
+                        Spacer()
+                        if let date = item.date {
+                            Text(date, format: .dateTime.month().day().hour().minute())
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -48,14 +92,25 @@ struct CampusBarApp: App {
     @StateObject private var store = CampusStore()
 
     var body: some Scene {
-        MenuBarExtra("강의실", systemImage: "books.vertical") {
+        MenuBarExtra {
             MenuContent(store: store)
+        } label: {
+            Label(store.menuTitle, systemImage: "books.vertical")
         }
         .menuBarExtraStyle(.window)
 
         Window("e-Campus 로그인", id: "login") {
-            LoginView(webView: store.webView)
-                .frame(minWidth: 820, minHeight: 650)
+            VStack(spacing: 0) {
+                LoginView(webView: store.webView)
+                HStack {
+                    Text("로그인 후 '강의실 확인'을 누르세요.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("강의실 확인") { store.refresh() }
+                }
+                .padding(10)
+            }
+            .frame(minWidth: 820, minHeight: 650)
         }
     }
 }
