@@ -50,7 +50,7 @@ struct MenuContent: View {
 
             Divider()
             HStack {
-                Button("e-Campus 로그인") { openWindow(id: "login") }
+                Button("앱에서 e-Campus 로그인") { openWindow(id: "login") }
                 Spacer()
                 Button("강의실 열기") {
                     NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!)

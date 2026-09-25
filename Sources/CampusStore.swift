@@ -11,6 +11,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     @Published private(set) var lastUpdated: Date?
     let webView: WKWebView
 
+    private let homeURL = URL(string: "https://e-campus.khu.ac.kr/index.php")!
     private let classroomURL = URL(string: "https://e-campus.khu.ac.kr/redirect/lms")!
     private let dashboardURL = URL(string: "https://khcanvas.khu.ac.kr/accounts/1/external_tools/184?launch_type=global_navigation")!
     private var canvasItems: [CampusItem] = []
@@ -62,7 +63,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         status = "강의실을 확인하는 중…"
         homepageRedirects = 0
         openedDashboard = false
-        webView.load(URLRequest(url: classroomURL))
+        webView.load(URLRequest(url: homeURL))
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -72,13 +73,23 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         }
         if webView.url?.host == "e-campus.khu.ac.kr",
            ["/", "/index.php"].contains(webView.url?.path ?? "") {
-            guard homepageRedirects < 2 else {
-                status = "강의실로 이동하지 못했습니다. 다시 로그인해 주세요"
-                return
+            let loadedURL = webView.url
+            webView.evaluateJavaScript("Boolean(document.querySelector('button[title=\"사용자 메뉴\"]'))") { [weak self] result, _ in
+                guard let self, self.webView.url == loadedURL else { return }
+                let signedIn = result as? Bool == true
+                self.logger.info("e-Campus signed in: \(signedIn, privacy: .public)")
+                guard signedIn else {
+                    self.status = "앱 안에서 e-Campus 로그인이 필요합니다 (Chrome와 별개)"
+                    return
+                }
+                guard self.homepageRedirects < 2 else {
+                    self.status = "학교 로그인 완료 · Canvas 연결 실패"
+                    return
+                }
+                self.homepageRedirects += 1
+                self.status = "로그인 완료 · 강의실로 이동 중…"
+                self.webView.load(URLRequest(url: self.classroomURL))
             }
-            homepageRedirects += 1
-            status = "로그인 완료 · 강의실로 이동 중…"
-            webView.load(URLRequest(url: classroomURL))
             return
         }
         guard webView.url?.host == "khcanvas.khu.ac.kr" else {
