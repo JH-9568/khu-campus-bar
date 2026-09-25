@@ -52,6 +52,8 @@ struct MenuContent: View {
                     NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!)
                 }
             }
+            Button("앱 종료") { NSApp.terminate(nil) }
+                .foregroundStyle(.secondary)
         }
         .padding(16)
         .frame(width: 350, alignment: .leading)

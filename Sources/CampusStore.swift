@@ -13,6 +13,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     private var canvasItems: [CampusItem] = []
     private var learningItems: [CampusItem] = []
     private var refreshTimer: Timer?
+    private var homepageRedirects = 0
 
     var dueItems: [CampusItem] {
         let now = Date()
@@ -54,10 +55,22 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
 
     func refresh() {
         status = "강의실을 확인하는 중…"
+        homepageRedirects = 0
         webView.load(URLRequest(url: dashboardURL))
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if webView.url?.host == "e-campus.khu.ac.kr",
+           ["/", "/index.php"].contains(webView.url?.path ?? "") {
+            guard homepageRedirects < 2 else {
+                status = "강의실로 이동하지 못했습니다. 다시 로그인해 주세요"
+                return
+            }
+            homepageRedirects += 1
+            status = "로그인 완료 · 강의실로 이동 중…"
+            webView.load(URLRequest(url: dashboardURL))
+            return
+        }
         guard webView.url?.host == "khcanvas.khu.ac.kr" else {
             status = "학교 로그인 후 강의실 확인을 눌러 주세요"
             return
