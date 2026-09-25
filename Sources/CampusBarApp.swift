@@ -26,8 +26,12 @@ struct MenuContent: View {
             }
 
             if store.items.isEmpty {
-                Text(store.status).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
+                VStack(spacing: 4) {
+                    Text(store.status)
+                    Text(store.currentPage).font(.caption)
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
             } else {
                 ForEach(store.dueItems.prefix(8)) { item in
                     itemRow(item)
@@ -105,8 +109,12 @@ struct CampusBarApp: App {
             VStack(spacing: 0) {
                 LoginView(webView: store.webView)
                 HStack {
-                    Text("이 창은 로그인용입니다. 결과는 메뉴 막대의 책 아이콘에서 확인하세요.")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(store.status)
+                        Text("현재: \(store.currentPage) · 결과는 메뉴 막대 책 아이콘에서 확인")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button("강의실 확인") { store.refresh() }
                 }

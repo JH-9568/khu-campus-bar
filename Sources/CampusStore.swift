@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SwiftUI
 import WebKit
 
@@ -6,6 +7,7 @@ import WebKit
 final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler {
     @Published private(set) var items: [CampusItem] = []
     @Published private(set) var status = "e-Campus에 로그인해 주세요"
+    @Published private(set) var currentPage = "연결 전"
     @Published private(set) var lastUpdated: Date?
     let webView: WKWebView
 
@@ -15,6 +17,8 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     private var learningItems: [CampusItem] = []
     private var refreshTimer: Timer?
     private var homepageRedirects = 0
+    private var openedDashboard = false
+    private let logger = Logger(subsystem: "com.jh9568.CampusBar", category: "navigation")
 
     var dueItems: [CampusItem] {
         let now = Date()
@@ -57,10 +61,15 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     func refresh() {
         status = "강의실을 확인하는 중…"
         homepageRedirects = 0
+        openedDashboard = false
         webView.load(URLRequest(url: classroomURL))
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if let url = webView.url {
+            currentPage = (url.host ?? "알 수 없음") + url.path
+            logger.info("Loaded \(self.currentPage, privacy: .public)")
+        }
         if webView.url?.host == "e-campus.khu.ac.kr",
            ["/", "/index.php"].contains(webView.url?.path ?? "") {
             guard homepageRedirects < 2 else {
@@ -76,7 +85,8 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
             status = "학교 로그인 후 강의실 확인을 눌러 주세요"
             return
         }
-        if webView.url?.path == "/" {
+        if webView.url?.path == "/" && !openedDashboard {
+            openedDashboard = true
             status = "강의실 연결 완료 · 학습 정보를 읽는 중…"
             webView.load(URLRequest(url: dashboardURL))
             return
@@ -84,6 +94,12 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         webView.evaluateJavaScript(CampusScripts.canvas) { [weak self] _, error in
             if let error { self?.status = "데이터 요청 실패: \(error.localizedDescription)" }
         }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        status = "페이지 연결 실패: \(error.localizedDescription)"
+        logger.error("Navigation failed: \(error.localizedDescription, privacy: .public)")
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
