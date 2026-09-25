@@ -3,12 +3,14 @@ import Foundation
 enum CampusKind: String, Decodable {
     case assignment
     case video
+    case activity
     case announcement
 
     var symbol: String {
         switch self {
         case .assignment: "doc.text"
         case .video: "play.rectangle"
+        case .activity: "calendar"
         case .announcement: "megaphone"
         }
     }

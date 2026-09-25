@@ -16,7 +16,7 @@ struct MenuContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("이번 주 강의실").font(.headline)
+            Text("앞으로 7일").font(.headline)
                 Spacer()
                 Button { store.refresh() } label: {
                     Image(systemName: "arrow.clockwise")

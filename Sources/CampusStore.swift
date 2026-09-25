@@ -10,9 +10,14 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     let webView: WKWebView
 
     private let dashboardURL = URL(string: "https://khcanvas.khu.ac.kr/accounts/1/external_tools/184?launch_type=global_navigation")!
+    private var canvasItems: [CampusItem] = []
+    private var learningItems: [CampusItem] = []
+    private var refreshTimer: Timer?
 
     var dueItems: [CampusItem] {
-        items.filter { $0.kind != .announcement && ($0.date ?? .distantPast) >= Date() }
+        let now = Date()
+        let end = Calendar.current.date(byAdding: .day, value: 7, to: now) ?? .distantFuture
+        return items.filter { $0.kind != .announcement && ($0.date ?? .distantPast) >= now && ($0.date ?? .distantFuture) <= end }
             .sorted { ($0.date ?? .distantFuture) < ($1.date ?? .distantFuture) }
     }
 
@@ -29,10 +34,17 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     override init() {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: CampusScripts.learningX, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
+        )
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         webView.configuration.userContentController.add(self, name: "canvasData")
+        webView.configuration.userContentController.add(self, name: "learningX")
         webView.navigationDelegate = self
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
         refresh()
     }
 
@@ -56,13 +68,19 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "canvasData", let json = message.body as? String,
+        guard ["canvasData", "learningX"].contains(message.name), let json = message.body as? String,
               let data = json.data(using: .utf8) else { return }
         if let payload = try? JSONDecoder().decode(CampusPayload.self, from: data) {
-            items = Array(Dictionary(grouping: payload.items.compactMap { $0.normalized() }, by: \.id)
-                .compactMap { $0.value.first })
+            let incoming = payload.items.compactMap { $0.normalized() }
+            if message.name == "canvasData" { canvasItems = incoming }
+            else { learningItems = incoming }
+            var merged: [String: CampusItem] = [:]
+            for item in canvasItems + learningItems where merged[item.id] == nil {
+                merged[item.id] = item
+            }
+            items = Array(merged.values)
             lastUpdated = Date()
-            status = "방금 업데이트됨"
+            status = "방금 업데이트됨 · Canvas \(canvasItems.count)건 · 학습 \(learningItems.count)건"
         } else if let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
             status = object["error"] ?? "강의실 응답을 읽지 못했습니다"
         }

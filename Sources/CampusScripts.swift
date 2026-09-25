@@ -12,7 +12,7 @@ enum CampusScripts {
         const names = Object.fromEntries(courses.map(c => [String(c.id), c.name]));
         const events = await get('/api/v1/users/self/upcoming_events?per_page=100');
         const items = (Array.isArray(events) ? events : []).map(e => ({
-          kind: 'assignment',
+          kind: e.assignment ? 'assignment' : 'activity',
           title: e.assignment?.name || e.title || '',
           course: names[String(e.context_code || '').replace('course_', '')] || '강의실',
           date: e.assignment?.due_at || e.start_at || null,
@@ -37,6 +37,39 @@ enum CampusScripts {
       } catch (error) {
         window.webkit.messageHandlers.canvasData.postMessage(JSON.stringify({error: String(error)}));
       }
+    })();
+    """#
+
+    static let learningX = #"""
+    (() => {
+      if (location.host !== 'khcanvas.khu.ac.kr' || location.pathname !== '/learningx/lti/dashboard') return;
+      let previous = '';
+      const scan = () => {
+        const cards = [...document.querySelectorAll('.xn-student-course-container')];
+        if (!cards.length) return;
+        const items = cards.flatMap(card => {
+          const course = card.querySelector('.xnscc-header-title')?.textContent?.trim() || '강의실';
+          return [...card.querySelectorAll('.xn-student-todo-item-container')].map(row => {
+            const link = row.querySelector('.xnsti-left-title');
+            const icon = row.querySelector('.xnsti-left-icon');
+            return {
+              kind: icon?.classList.contains('video') || icon?.classList.contains('youtube') ? 'video' : 'assignment',
+              title: link?.textContent?.trim() || '',
+              course,
+              date: row.querySelector('.xnsti-right-due-at')?.textContent?.trim() || null,
+              url: link?.href || ''
+            };
+          });
+        });
+        const json = JSON.stringify({items});
+        if (json !== previous) {
+          previous = json;
+          window.webkit.messageHandlers.learningX.postMessage(json);
+        }
+      };
+      const observer = new MutationObserver(() => requestAnimationFrame(scan));
+      observer.observe(document.documentElement, {childList: true, subtree: true, characterData: true});
+      scan();
     })();
     """#
 }
