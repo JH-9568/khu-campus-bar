@@ -9,6 +9,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     @Published private(set) var lastUpdated: Date?
     let webView: WKWebView
 
+    private let classroomURL = URL(string: "https://e-campus.khu.ac.kr/redirect/lms")!
     private let dashboardURL = URL(string: "https://khcanvas.khu.ac.kr/accounts/1/external_tools/184?launch_type=global_navigation")!
     private var canvasItems: [CampusItem] = []
     private var learningItems: [CampusItem] = []
@@ -56,7 +57,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     func refresh() {
         status = "강의실을 확인하는 중…"
         homepageRedirects = 0
-        webView.load(URLRequest(url: dashboardURL))
+        webView.load(URLRequest(url: classroomURL))
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -68,11 +69,16 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
             }
             homepageRedirects += 1
             status = "로그인 완료 · 강의실로 이동 중…"
-            webView.load(URLRequest(url: dashboardURL))
+            webView.load(URLRequest(url: classroomURL))
             return
         }
         guard webView.url?.host == "khcanvas.khu.ac.kr" else {
             status = "학교 로그인 후 강의실 확인을 눌러 주세요"
+            return
+        }
+        if webView.url?.path == "/" {
+            status = "강의실 연결 완료 · 학습 정보를 읽는 중…"
+            webView.load(URLRequest(url: dashboardURL))
             return
         }
         webView.evaluateJavaScript(CampusScripts.canvas) { [weak self] _, error in

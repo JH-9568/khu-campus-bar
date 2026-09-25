@@ -105,7 +105,7 @@ struct CampusBarApp: App {
             VStack(spacing: 0) {
                 LoginView(webView: store.webView)
                 HStack {
-                    Text("로그인 후 '강의실 확인'을 누르세요.")
+                    Text("이 창은 로그인용입니다. 결과는 메뉴 막대의 책 아이콘에서 확인하세요.")
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button("강의실 확인") { store.refresh() }
