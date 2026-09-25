@@ -11,12 +11,12 @@ struct LoginView: NSViewRepresentable {
 
 struct MenuContent: View {
     @ObservedObject var store: CampusStore
-    @Environment(\.openWindow) private var openWindow
+    var connect: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-            Text("앞으로 7일").font(.headline)
+                Text("앞으로 7일").font(.headline)
                 Spacer()
                 Button { store.refresh() } label: {
                     Image(systemName: "arrow.clockwise")
@@ -33,16 +33,20 @@ struct MenuContent: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
             } else {
-                ForEach(store.dueItems.prefix(8)) { item in
-                    itemRow(item)
-                }
-                if !store.announcementItems.isEmpty {
-                    Divider()
-                    Text("최근 공지").font(.subheadline.bold())
-                    ForEach(store.announcementItems.prefix(3)) { item in
-                        itemRow(item)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if store.dueItems.isEmpty {
+                            Text("앞으로 7일 이내 마감 항목이 없습니다.").foregroundStyle(.secondary)
+                        }
+                        ForEach(store.dueItems) { item in itemRow(item) }
+                        if !store.announcementItems.isEmpty {
+                            Divider()
+                            Text("최근 공지").font(.subheadline.bold())
+                            ForEach(store.announcementItems) { item in itemRow(item) }
+                        }
                     }
                 }
+                .frame(maxHeight: 440)
                 Text(store.status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -50,14 +54,20 @@ struct MenuContent: View {
 
             Divider()
             HStack {
-                Button("앱에서 e-Campus 로그인") { openWindow(id: "login") }
+                Button("학교 연결 / 학기 선택") {
+                    if let connect { connect() } else { store.showWindow() }
+                }
                 Spacer()
                 Button("강의실 열기") {
                     NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!)
                 }
             }
-            Button("앱 종료") { NSApp.terminate(nil) }
-                .foregroundStyle(.secondary)
+            HStack {
+                Button("로그인 정보 지우기") { store.clearLogin() }
+                Spacer()
+                Button("앱 종료") { NSApp.terminate(nil) }
+            }
+            .foregroundStyle(.secondary)
         }
         .padding(16)
         .frame(width: 350, alignment: .leading)
@@ -93,6 +103,55 @@ struct MenuContent: View {
     }
 }
 
+struct CampusWindowContent: View {
+    @ObservedObject var store: CampusStore
+    @State private var showConnection = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("CampusBar").font(.headline)
+                Spacer()
+                Button("요약") { showConnection = false }
+                Button("학교 연결 / 학기 선택") { showConnection = true }
+            }
+            .padding(12)
+            Divider()
+            ZStack {
+                LoginView(webView: store.webView)
+                    .opacity(showConnection ? 1 : 0)
+                    .allowsHitTesting(showConnection)
+                    .accessibilityHidden(!showConnection)
+                if !showConnection {
+                    VStack {
+                        MenuContent(store: store, connect: { showConnection = true })
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                }
+            }
+            Divider()
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(store.status)
+                    if showConnection {
+                        Text("현재: \(store.currentPage)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Button("새로고침") { store.refresh() }
+            }
+            .padding(10)
+        }
+        .frame(minWidth: 820, minHeight: 650)
+        .onAppear { showConnection = store.lastUpdated == nil }
+        .onChange(of: store.lastUpdated) { _, _ in
+            if !store.dueItems.isEmpty || !store.announcementItems.isEmpty { showConnection = false }
+        }
+    }
+}
+
 @main
 struct CampusBarApp: App {
     @StateObject private var store = CampusStore()
@@ -104,23 +163,5 @@ struct CampusBarApp: App {
             Label(store.menuTitle, systemImage: "books.vertical")
         }
         .menuBarExtraStyle(.window)
-
-        Window("e-Campus 로그인", id: "login") {
-            VStack(spacing: 0) {
-                LoginView(webView: store.webView)
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(store.status)
-                        Text("현재: \(store.currentPage) · 결과는 메뉴 막대 책 아이콘에서 확인")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("강의실 확인") { store.refresh() }
-                }
-                .padding(10)
-            }
-            .frame(minWidth: 820, minHeight: 650)
-        }
     }
 }

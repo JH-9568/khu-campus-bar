@@ -4,7 +4,7 @@ import SwiftUI
 import WebKit
 
 @MainActor
-final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler {
+final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler, WKHTTPCookieStoreObserver {
     @Published private(set) var items: [CampusItem] = []
     @Published private(set) var status = "e-Campus에 로그인해 주세요"
     @Published private(set) var currentPage = "연결 전"
@@ -19,6 +19,10 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     private var refreshTimer: Timer?
     private var homepageRedirects = 0
     private var openedDashboard = false
+    private var sourceErrors: [String: String] = [:]
+    private var clearingSession = false
+    private var connectionWindow: NSWindow?
+    private var promptedLogin = false
     private let logger = Logger(subsystem: "com.jh9568.CampusBar", category: "navigation")
 
     var dueItems: [CampusItem] {
@@ -52,7 +56,54 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        refresh()
+        Task { @MainActor in
+            let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
+            let saved = SessionCookies.load()
+            for cookie in saved { await cookieStore.setCookie(cookie) }
+            logger.info("Restored \(saved.count) school session cookies")
+            cookieStore.add(self)
+            refresh()
+        }
+    }
+
+    func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
+        guard !clearingSession else { return }
+        cookieStore.getAllCookies { [weak self] cookies in
+            guard let self, !self.clearingSession else { return }
+            let result = SessionCookies.save(cookies)
+            if result != errSecSuccess { self.logger.error("Session save failed: \(result)") }
+        }
+    }
+
+    func clearLogin() {
+        clearingSession = true
+        Task { @MainActor in
+            let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
+            for cookie in await cookieStore.allCookies() { await cookieStore.deleteCookie(cookie) }
+            SessionCookies.clear()
+            canvasItems = []
+            learningItems = []
+            sourceErrors = [:]
+            items = []
+            lastUpdated = nil
+            promptedLogin = false
+            clearingSession = false
+            refresh()
+        }
+    }
+
+    func showWindow() {
+        if connectionWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                                  styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+            window.title = "CampusBar"
+            window.contentView = NSHostingView(rootView: CampusWindowContent(store: self))
+            window.isReleasedWhenClosed = false
+            window.center()
+            connectionWindow = window
+        }
+        connectionWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func refreshIfNeeded() {
@@ -80,6 +131,11 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
                 self.logger.info("e-Campus signed in: \(signedIn, privacy: .public)")
                 guard signedIn else {
                     self.status = "앱 안에서 e-Campus 로그인이 필요합니다 (Chrome와 별개)"
+                    if !self.promptedLogin {
+                        self.promptedLogin = true
+                        self.showWindow()
+                        self.webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")!))
+                    }
                     return
                 }
                 guard self.homepageRedirects < 2 else {
@@ -93,7 +149,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
             return
         }
         guard webView.url?.host == "khcanvas.khu.ac.kr" else {
-            status = "학교 로그인 후 강의실 확인을 눌러 주세요"
+            status = "학교 로그인을 마치면 자동으로 정보를 가져옵니다"
             return
         }
         if webView.url?.path == "/" && !openedDashboard {
@@ -118,6 +174,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
               let data = json.data(using: .utf8) else { return }
         if let payload = try? JSONDecoder().decode(CampusPayload.self, from: data) {
             let incoming = payload.items.compactMap { $0.normalized() }
+            sourceErrors.removeValue(forKey: message.name)
             if message.name == "canvasData" { canvasItems = incoming }
             else { learningItems = incoming }
             var merged: [String: CampusItem] = [:]
@@ -126,9 +183,18 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
             }
             items = Array(merged.values)
             lastUpdated = Date()
-            status = "방금 업데이트됨 · Canvas \(canvasItems.count)건 · 학습 \(learningItems.count)건"
+            logger.info("Collected \(message.name, privacy: .public): \(incoming.count) items; upcoming \(self.dueItems.count), announcements \(self.announcementItems.count)")
+            updateCollectionStatus()
         } else if let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-            status = object["error"] ?? "강의실 응답을 읽지 못했습니다"
+            let error = object["error"] ?? "강의실 응답을 읽지 못했습니다"
+            sourceErrors[message.name] = error
+            logger.error("Collection failed \(message.name, privacy: .public): \(error, privacy: .public)")
+            updateCollectionStatus()
         }
+    }
+
+    private func updateCollectionStatus() {
+        let summary = "마감 \(dueItems.count)건 · 공지 \(announcementItems.count)건"
+        status = sourceErrors.isEmpty ? "업데이트 완료 · \(summary)" : "\(summary) · 일부 수집 실패: \(sourceErrors.values.sorted().joined(separator: "; "))"
     }
 }
