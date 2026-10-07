@@ -186,12 +186,15 @@ struct CampusSettingsView: View {
                         do {
                             try await store.saveAutomaticLogin(username: username, password: password)
                             username = ""; password = ""
-                            message = "키체인에 저장했습니다. 학교 연결 상태를 확인합니다."
+                            message = "키체인에 저장했습니다. 실제 로그인을 확인합니다."
                         } catch { message = error.localizedDescription }
                         saving = false
                     }
                 }.buttonStyle(.borderedProminent).disabled(saving || username.isEmpty || password.isEmpty)
             }
+            Button("저장된 정보로 다시 로그인") { store.reconnectWithSavedLogin() }
+                .disabled(saving || !store.automaticLoginEnabled)
+            Text(store.status).font(.caption).fixedSize(horizontal: false, vertical: true)
             Text("비밀번호 오류나 추가 인증이 나오면 자동 재시도를 멈춥니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width: 460)
@@ -255,9 +258,9 @@ final class CampusAppDelegate: NSObject, NSApplicationDelegate {
             add("강의실 웹사이트 열기", action: #selector(openClassroom), to: menu)
             menu.addItem(.separator())
             add("CampusBar 종료", action: #selector(quit), to: menu)
-            statusItem.menu = menu
-            sender.performClick(nil)
-            statusItem.menu = nil
+            // Open the menu directly: performClick re-enters button tracking and
+            // can discard a right-mouse-up event before the menu starts tracking.
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.minY - 4), in: sender)
         } else if popover.isShown {
             popover.performClose(nil)
         } else {

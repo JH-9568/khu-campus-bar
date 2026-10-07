@@ -4,7 +4,7 @@ import SwiftUI
 import WebKit
 
 @MainActor
-final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScriptMessageHandler, WKHTTPCookieStoreObserver {
+final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKHTTPCookieStoreObserver {
     @Published private(set) var items: [CampusItem] = []
     @Published private(set) var status = "e-Campus에 로그인해 주세요"
     @Published private(set) var currentPage = "연결 전"
@@ -29,6 +29,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
     private var settingsWindow: NSWindow?
     private var loginPolicy = AutoLoginPolicy(paused: UserDefaults.standard.bool(forKey: "automaticLoginPaused"))
     private var authenticating = false
+    private var loginFailureNotice: String?
     private var needsManualLogin = false
     private var loginTimeout: Task<Void, Never>?
     private let logger = Logger(subsystem: "com.jh9568.CampusBar", category: "navigation")
@@ -61,6 +62,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         webView.configuration.userContentController.add(self, name: "canvasData")
         webView.configuration.userContentController.add(self, name: "learningX")
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.needsManualLogin else { return }
@@ -69,7 +71,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         }
         Task { @MainActor in
             let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
-            let saved = SessionCookies.load()
+            let saved = await SessionPersistence.shared.load()
             for cookie in saved { await cookieStore.setCookie(cookie) }
             logger.info("Restored \(saved.count) school session cookies")
             cookieStore.add(self)
@@ -81,8 +83,11 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         guard !clearingSession else { return }
         cookieStore.getAllCookies { [weak self] cookies in
             guard let self, !self.clearingSession else { return }
-            let result = SessionCookies.save(cookies)
-            if result != errSecSuccess { self.logger.error("Session save failed: \(result)") }
+            Task { @MainActor in
+                guard !self.clearingSession else { return }
+                let result = await SessionPersistence.shared.save(cookies)
+                if result != errSecSuccess { self.logger.error("Session save failed: \(result)") }
+            }
         }
     }
 
@@ -91,7 +96,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         Task { @MainActor in
             let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
             for cookie in await cookieStore.allCookies() { await cookieStore.deleteCookie(cookie) }
-            SessionCookies.clear()
+            await SessionPersistence.shared.clear()
             do { try await SchoolCredentials.shared.clear() }
             catch { status = error.localizedDescription; clearingSession = false; return }
             automaticLoginEnabled = false
@@ -144,7 +149,17 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         resetLoginAttempt()
         needsManualLogin = false
         promptedLogin = false
-        refresh()
+        reconnectWithSavedLogin()
+    }
+
+    func reconnectWithSavedLogin() {
+        guard automaticLoginEnabled, !authenticating else { return }
+        resetLoginAttempt()
+        needsManualLogin = false
+        promptedLogin = false
+        status = "저장된 계정으로 로그인 확인 중…"
+        showWindow()
+        webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")!))
     }
 
     func disableAutomaticLogin() async throws {
@@ -158,6 +173,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         loginTimeout?.cancel()
         authenticating = false
         loginPolicy.reset()
+        loginFailureNotice = nil
         automaticLoginPaused = false
         UserDefaults.standard.set(false, forKey: "automaticLoginPaused")
     }
@@ -167,6 +183,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         authenticating = false
         needsManualLogin = true
         status = message
+        logger.info("Manual login needed; automatic retries paused: \(pause, privacy: .public)")
         if pause {
             loginPolicy.fail()
             automaticLoginPaused = true
@@ -180,7 +197,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
 
     private func handleLoginPage() {
         if loginPolicy.attempted {
-            requireManualLogin("자동 로그인 실패 · 학교 연결에서 직접 로그인하거나 설정에서 정보를 수정해 주세요", pause: true)
+            requireManualLogin(loginFailureNotice ?? "자동 로그인 실패 · 학교 연결에서 직접 로그인하거나 설정에서 정보를 수정해 주세요", pause: true)
             return
         }
         guard automaticLoginEnabled, !loginPolicy.paused else {
@@ -201,9 +218,11 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
                 }
                 // If the app exits during authentication, do not retry unattended on every launch.
                 UserDefaults.standard.set(true, forKey: "automaticLoginPaused")
-                status = "학교 세션 만료 · 자동 로그인 중…"
+                status = "저장된 계정으로 자동 로그인 중…"
+                logger.info("Automatic login: submitting school form")
                 let submitted = try await webView.callAsyncJavaScript(CampusScripts.autoLogin,
                     arguments: ["username": login.username, "password": login.password], in: nil, contentWorld: .page)
+                logger.info("Automatic login: form accepted \(submitted as? Bool == true, privacy: .public)")
                 guard submitted as? Bool == true else {
                     requireManualLogin("로그인 화면 변경 또는 추가 인증 · 학교 연결에서 확인해 주세요", pause: true)
                     return
@@ -282,6 +301,22 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKScr
         webView.evaluateJavaScript(CampusScripts.canvas) { [weak self] _, error in
             if let error { self?.status = "데이터 요청 실패: \(error.localizedDescription)" }
         }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
+        if frame.isMainFrame, AutoLoginPolicy.isLoginPage(frame.request.url) {
+            loginFailureNotice = "학교 로그인 안내: " + message
+            requireManualLogin(loginFailureNotice!, pause: true)
+        } else {
+            showWindow()
+            let alert = NSAlert()
+            alert.messageText = "학교 사이트 안내"
+            alert.informativeText = message
+            alert.beginSheetModal(for: connectionWindow!) { _ in completionHandler() }
+            return
+        }
+        completionHandler()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

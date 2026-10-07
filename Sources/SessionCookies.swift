@@ -46,3 +46,11 @@ enum SessionCookies {
 
     static func clear() { SecItemDelete(query as CFDictionary) }
 }
+
+// Keychain authorization can wait for user input; keep it off the main actor.
+actor SessionPersistence {
+    static let shared = SessionPersistence()
+    func load() -> [HTTPCookie] { SessionCookies.load() }
+    func save(_ cookies: [HTTPCookie]) -> OSStatus { SessionCookies.save(cookies) }
+    func clear() { SessionCookies.clear() }
+}
