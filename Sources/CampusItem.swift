@@ -1,6 +1,6 @@
 import Foundation
 
-enum CampusKind: String, Decodable {
+enum CampusKind: String, Codable {
     case assignment
     case video
     case activity
@@ -16,17 +16,21 @@ enum CampusKind: String, Decodable {
     }
 }
 
-struct CampusItem: Identifiable, Equatable {
+struct CampusItem: Identifiable, Equatable, Codable {
     let id: String
     let kind: CampusKind
     let title: String
     let course: String
     let date: Date?
     let url: String
+    var completed = false
+    var completionLabel: String? = nil
+    var completedAt: Date? = nil
 }
 
 struct CampusPayload: Decodable {
     let items: [RawCampusItem]
+    var warning: String? = nil
 }
 
 struct RawCampusItem: Decodable {
@@ -35,6 +39,9 @@ struct RawCampusItem: Decodable {
     let course: String
     let date: String?
     let url: String
+    var completed: Bool? = nil
+    var completionLabel: String? = nil
+    var completedAt: String? = nil
 
     func normalized() -> CampusItem? {
         guard !title.isEmpty, !url.isEmpty else { return nil }
@@ -44,7 +51,10 @@ struct RawCampusItem: Decodable {
             title: title.trimmingCharacters(in: .whitespacesAndNewlines),
             course: course,
             date: date.flatMap(Self.parseDate),
-            url: url
+            url: url,
+            completed: completed ?? false,
+            completionLabel: completionLabel,
+            completedAt: completedAt.flatMap(Self.parseDate)
         )
     }
 

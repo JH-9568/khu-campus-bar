@@ -23,24 +23,57 @@ enum CampusScripts {
     (async () => {
       try {
         const get = async path => {
-          const response = await fetch(path, {
-            credentials: 'same-origin', headers: {Accept: 'application/json'}
-          });
-          if (!response.ok) throw new Error(`Canvas API ${response.status}: ${path.split('?')[0]}`);
-          const body = await response.text();
-          return JSON.parse(body.replace(/^\s*while\(1\);/, ''));
+          let next = new URL(path, location.origin), rows = [], seen = new Set();
+          while (next) {
+            if (next.origin !== location.origin || seen.has(next.href) || seen.size >= 100)
+              throw new Error('목록 페이지를 모두 확인하지 못했습니다');
+            seen.add(next.href);
+            const response = await fetch(next.href, {
+              credentials: 'same-origin', headers: {Accept: 'application/json'}
+            });
+            if (!response.ok) throw new Error(`Canvas API ${response.status}: ${next.pathname}`);
+            const body = JSON.parse((await response.text()).replace(/^\s*while\(1\);/, ''));
+            if (!Array.isArray(body)) throw new Error('목록 응답 형식이 바뀌었습니다');
+            rows.push(...body);
+            const link = response.headers?.get('Link') || '';
+            const following = link.split(',').map(s => s.match(/<([^>]+)>;\s*rel="next"/)).find(Boolean);
+            next = following ? new URL(following[1], location.origin) : null;
+          }
+          return rows;
         };
         const courses = await get('/api/v1/courses?enrollment_state=active&per_page=100');
-        if (!Array.isArray(courses)) throw new Error('과목 목록을 읽지 못했습니다');
         const names = Object.fromEntries(courses.map(c => [String(c.id), c.name]));
         const events = await get('/api/v1/users/self/upcoming_events?per_page=100');
-        const items = (Array.isArray(events) ? events : []).map(e => ({
+        const items = events.map(e => ({
           kind: e.assignment ? 'assignment' : 'activity',
           title: e.assignment?.name || e.title || '',
           course: names[String(e.context_code || '').replace('course_', '')] || '강의실',
           date: e.assignment?.due_at || e.start_at || null,
           url: e.assignment?.html_url || e.html_url || ''
         }));
+        // Include the current student's submission; do not fetch grades or other students.
+        // Keep partial course failures explicit while retaining upcoming events as a fallback.
+        const warnings = [];
+        for (const course of courses) {
+          try {
+            const assignments = await get(`/api/v1/courses/${course.id}/assignments?include[]=submission&per_page=100`);
+            for (const a of assignments) {
+              if (a.published === false || a.submission_types?.includes('not_graded')) continue;
+              const s = a.submission;
+              const completed = Boolean(s && !s.redo_request && (s.excused ||
+                ['submitted', 'pending_review'].includes(s.workflow_state) ||
+                (s.workflow_state === 'graded' && s.submitted_at)));
+              const item = {
+                kind: 'assignment', title: a.name || '', course: course.name,
+                date: a.due_at || null, url: a.html_url || '', completed,
+                completionLabel: completed ? (s.excused ? '제출 면제' : '제출 완료') : null,
+                completedAt: completed ? s.submitted_at || s.graded_at || null : null
+              };
+              const existing = items.findIndex(e => e.url === item.url);
+              if (existing >= 0) items[existing] = item; else items.push(item);
+            }
+          } catch { warnings.push(`${course.name}: 제출 상태 확인 실패`); }
+        }
         const params = new URLSearchParams({per_page: '100'});
         const start = new Date(Date.now() - 14 * 86400000);
         params.set('start_date', start.toISOString().slice(0, 10));
@@ -56,7 +89,7 @@ enum CampusScripts {
             });
           }
         }
-        window.webkit.messageHandlers.canvasData.postMessage(JSON.stringify({items}));
+        window.webkit.messageHandlers.canvasData.postMessage(JSON.stringify({items, warning: warnings.join(" · ")}));
       } catch (error) {
         window.webkit.messageHandlers.canvasData.postMessage(JSON.stringify({error: String(error)}));
       }

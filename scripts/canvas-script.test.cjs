@@ -10,11 +10,12 @@ test('reads cookie-authenticated Canvas JSON and maps deadlines and announcement
   const responses = [
     [{ id: 1, name: 'Fixture course' }],
     [{ context_code: 'course_1', assignment: { name: 'Fixture assignment', due_at: '2026-10-01T14:59:00Z', html_url: 'https://khcanvas.khu.ac.kr/courses/1/assignments/2' } }],
+    [{name: 'Fixture assignment', html_url: 'https://khcanvas.khu.ac.kr/courses/1/assignments/2', submission: {workflow_state: 'unsubmitted'}}],
     [{ context_code: 'course_1', title: 'Fixture notice', posted_at: '2026-09-25T00:00:00Z', html_url: 'https://khcanvas.khu.ac.kr/courses/1/discussion_topics/3' }]
   ];
   let payload;
   await vm.runInNewContext(source, {
-    URLSearchParams,
+    URLSearchParams, URL, location: {origin: "https://khcanvas.khu.ac.kr"},
     fetch: async (path, options) => {
       assert.equal(options.headers.Accept, 'application/json');
       assert.equal(options.credentials, 'same-origin');
@@ -30,6 +31,7 @@ test('reads cookie-authenticated Canvas JSON and maps deadlines and announcement
 test('reports a failed endpoint instead of treating it as an empty course list', async () => {
   let payload;
   await vm.runInNewContext(source, {
+    URL, location: {origin: "https://khcanvas.khu.ac.kr"},
     fetch: async () => ({ ok: false, status: 401 }),
     window: { webkit: { messageHandlers: { canvasData: { postMessage: text => payload = JSON.parse(text) } } } }
   });
@@ -84,4 +86,46 @@ test('automatic login refuses other origins, frames, redirected forms and challe
     assert.equal(fixture.submitted, 0);
     assert.equal(fixture.passwordField.value, '');
   }
+});
+
+async function submissionFixture(assignments, {failure = false, paged = false} = {}) {
+  let payload, pages = 0;
+  await vm.runInNewContext(source, {
+    URL, URLSearchParams, location: {origin: 'https://khcanvas.khu.ac.kr'},
+    fetch: async path => {
+      let body = [], link = '';
+      if (path.includes('/courses?')) body = [{id: 1, name: 'Fixture course'}];
+      if (path.includes('/assignments?')) {
+        if (failure) return {ok: false, status: 403};
+        pages++;
+        body = paged && pages === 1 ? [] : assignments;
+        if (paged && pages === 1) link = '<https://khcanvas.khu.ac.kr/api/v1/courses/1/assignments?page=2>; rel="next"';
+      }
+      return {ok: true, headers: {get: () => link}, text: async () => JSON.stringify(body)};
+    },
+    window: {webkit: {messageHandlers: {canvasData: {postMessage: text => payload = JSON.parse(text)}}}}
+  });
+  return {payload, pages};
+}
+test('submission states separate completed work from zero grades and resubmission requests', async () => {
+  const submissions = [
+    {workflow_state: 'submitted'}, {workflow_state: 'pending_review'},
+    {workflow_state: 'graded', submitted_at: '2026-10-01T14:59:00Z'},
+    {workflow_state: 'graded', grade: '0'}, {workflow_state: 'unsubmitted'},
+    {workflow_state: 'submitted', redo_request: true}, {excused: true}
+  ];
+  const {payload} = await submissionFixture(submissions.map((submission, i) => ({
+    name: `Task ${i}`, html_url: `https://khcanvas.khu.ac.kr/courses/1/assignments/${i}`, submission
+  })));
+  assert.deepEqual(payload.items.map(item => item.completed), [true, true, true, false, false, false, true]);
+  assert.equal(payload.items[6].completionLabel, '제출 면제');
+});
+test('assignment pagination includes completed items beyond the first page', async () => {
+  const {payload, pages} = await submissionFixture([{name: 'Page two', html_url: 'https://khcanvas.khu.ac.kr/courses/1/assignments/2', submission: {workflow_state: 'submitted'}}], {paged: true});
+  assert.equal(pages, 2);
+  assert.equal(payload.items[0].completed, true);
+});
+test('unavailable submission data is reported as a partial failure', async () => {
+  const {payload} = await submissionFixture([], {failure: true});
+  assert.match(payload.warning, /제출 상태 확인 실패/);
 });

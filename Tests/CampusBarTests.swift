@@ -44,6 +44,18 @@ final class CampusBarTests: XCTestCase {
         XCTAssertTrue(policy.beginSessionVerification())
     }
 
+    func testCompletionPayloadAndSavedSnapshot() throws {
+        let json = #"{"items":[{"kind":"assignment","title":"Submitted","course":"Fixture","date":null,"url":"https://khcanvas.khu.ac.kr/courses/1/assignments/2","completed":true,"completionLabel":"제출 완료","completedAt":"2026-10-01T14:59:00Z"},{"kind":"video","title":"Video","course":"Fixture","url":"https://khcanvas.khu.ac.kr/video/1"}]}"#
+        let payload = try JSONDecoder().decode(CampusPayload.self, from: Data(json.utf8))
+        let submitted = try XCTUnwrap(payload.items[0].normalized())
+        XCTAssertTrue(submitted.completed)
+        XCTAssertEqual(submitted.completionLabel, "제출 완료")
+        XCTAssertNotNil(submitted.completedAt)
+        XCTAssertFalse(try XCTUnwrap(payload.items[1].normalized()).completed)
+        let snapshot = try JSONDecoder().decode(CampusItem.self, from: JSONEncoder().encode(submitted))
+        XCTAssertEqual(snapshot, submitted)
+    }
+
     func testDatesAndInvalidItems() {
         let local = RawCampusItem.parseDate("2026.10.01 23:59")
         let iso = RawCampusItem.parseDate("2026-10-01T14:59:00Z")

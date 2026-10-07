@@ -6,9 +6,12 @@ import WebKit
 @MainActor
 final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKHTTPCookieStoreObserver {
     @Published private(set) var items: [CampusItem] = []
-    @Published private(set) var status = "e-Campus에 로그인해 주세요"
+    @Published private(set) var status = "저장된 학교 세션 복원 중…"
     @Published private(set) var currentPage = "연결 전"
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var manualCompletions = UserDefaults.standard.dictionary(forKey: "manualCompletions") as? [String: Double] ?? [:]
+    private var completionSnapshots: [String: CampusItem] = UserDefaults.standard.data(forKey: "completionSnapshots")
+        .flatMap { try? JSONDecoder().decode([String: CampusItem].self, from: $0) } ?? [:]
     @Published var showConnection = true
     @Published private(set) var automaticLoginEnabled = UserDefaults.standard.bool(forKey: "automaticLoginEnabled")
     @Published private(set) var automaticLoginPaused = UserDefaults.standard.bool(forKey: "automaticLoginPaused")
@@ -24,6 +27,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     private var openedDashboard = false
     private var sourceErrors: [String: String] = [:]
     private var clearingSession = false
+    private var restoringSession = true
     private var connectionWindow: NSWindow?
     private var promptedLogin = false
     private var settingsWindow: NSWindow?
@@ -37,8 +41,51 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     var dueItems: [CampusItem] {
         let now = Date()
         let end = Calendar.current.date(byAdding: .day, value: 7, to: now) ?? .distantFuture
-        return items.filter { $0.kind != .announcement && ($0.date ?? .distantPast) >= now && ($0.date ?? .distantFuture) <= end }
+        return items.filter { $0.kind != .announcement && !isCompleted($0) && ($0.date ?? .distantPast) >= now && ($0.date ?? .distantFuture) <= end }
             .sorted { ($0.date ?? .distantFuture) < ($1.date ?? .distantFuture) }
+    }
+
+    func isCompleted(_ item: CampusItem) -> Bool { item.completed || manualCompletions[item.id] != nil }
+
+    func toggleCompletion(_ item: CampusItem) {
+        guard item.kind != .announcement, !item.completed else { return }
+        if manualCompletions[item.id] == nil {
+            manualCompletions[item.id] = Date().timeIntervalSince1970
+            completionSnapshots[item.id] = item
+        } else {
+            manualCompletions.removeValue(forKey: item.id)
+            completionSnapshots.removeValue(forKey: item.id)
+        }
+        if let data = try? JSONEncoder().encode(completionSnapshots) {
+            UserDefaults.standard.set(data, forKey: "completionSnapshots")
+        }
+        UserDefaults.standard.set(manualCompletions, forKey: "manualCompletions")
+        updateCollectionStatus()
+    }
+
+    var overdueItems: [CampusItem] {
+        let start = Date().addingTimeInterval(-30 * 86400), now = Date()
+        return items.filter { $0.kind != .announcement && !isCompleted($0) && ($0.date ?? .distantFuture) < now && ($0.date ?? .distantPast) >= start }
+            .sorted { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+    }
+    var undatedItems: [CampusItem] {
+        items.filter { $0.kind != .announcement && !isCompleted($0) && $0.date == nil }.sorted { $0.course + $0.title < $1.course + $1.title }
+    }
+    var futureItems: [CampusItem] {
+        let end = Calendar.current.date(byAdding: .day, value: 7, to: Date()) ?? .distantFuture
+        return items.filter { $0.kind != .announcement && !isCompleted($0) && ($0.date ?? .distantPast) > end }
+            .sorted { ($0.date ?? .distantFuture) < ($1.date ?? .distantFuture) }
+    }
+    var pendingCount: Int { overdueItems.count + dueItems.count + futureItems.count + undatedItems.count }
+    var completedItems: [CampusItem] {
+        let start = Date().addingTimeInterval(-30 * 86400)
+        func date(_ item: CampusItem) -> Date {
+            manualCompletions[item.id].map(Date.init(timeIntervalSince1970:)) ?? item.completedAt ?? item.date ?? .distantPast
+        }
+        let currentIDs = Set(items.map(\.id))
+        let retained = completionSnapshots.values.filter { !currentIDs.contains($0.id) }
+        return (items + retained).filter { $0.kind != .announcement && isCompleted($0) && date($0) >= start }
+            .sorted { date($0) > date($1) }
     }
 
     var announcementItems: [CampusItem] {
@@ -47,7 +94,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     }
 
     var menuTitle: String {
-        let count = dueItems.count
+        let count = pendingCount
         return count == 0 ? "강의실" : "할 일 \(count)"
     }
 
@@ -75,6 +122,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
             for cookie in saved { await cookieStore.setCookie(cookie) }
             logger.info("Restored \(saved.count) school session cookies")
             cookieStore.add(self)
+            restoringSession = false
             refresh()
         }
     }
@@ -153,7 +201,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     }
 
     func reconnectWithSavedLogin() {
-        guard automaticLoginEnabled, !authenticating else { return }
+        guard automaticLoginEnabled, !authenticating, !restoringSession else { return }
         resetLoginAttempt()
         needsManualLogin = false
         promptedLogin = false
@@ -261,7 +309,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     }
 
     func refresh() {
-        guard !authenticating, !clearingSession else { return }
+        guard !authenticating, !clearingSession, !restoringSession else { return }
         status = "강의실을 확인하는 중…"
         homepageRedirects = 0
         openedDashboard = false
@@ -370,6 +418,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         if let payload = try? JSONDecoder().decode(CampusPayload.self, from: data) {
             let incoming = payload.items.compactMap { $0.normalized() }
             sourceErrors.removeValue(forKey: message.name)
+            if let warning = payload.warning, !warning.isEmpty { sourceErrors[message.name] = warning }
             if message.name == "canvasData" { canvasItems = incoming }
             else { learningItems = incoming }
             var merged: [String: CampusItem] = [:]
@@ -389,7 +438,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     }
 
     private func updateCollectionStatus() {
-        let summary = "마감 \(dueItems.count)건 · 공지 \(announcementItems.count)건"
+        let summary = "할 일 \(pendingCount)건 · 완료 \(completedItems.count)건 · 공지 \(announcementItems.count)건"
         status = sourceErrors.isEmpty ? "업데이트 완료 · \(summary)" : "\(summary) · 일부 수집 실패: \(sourceErrors.values.sorted().joined(separator: "; "))"
     }
 }

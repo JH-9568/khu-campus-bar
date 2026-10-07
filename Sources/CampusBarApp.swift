@@ -13,95 +13,102 @@ struct LoginView: NSViewRepresentable {
 struct MenuContent: View {
     @ObservedObject var store: CampusStore
     var connect: (() -> Void)? = nil
+    @State private var selected = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("앞으로 7일").font(.headline)
+                Text("내 강의실").font(.headline)
                 Spacer()
-                Button { store.refresh() } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("새로고침")
+                Button { store.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("새로고침")
             }
+            Picker("목록", selection: $selected) {
+                Text("할 일 \(store.pendingCount)").tag(0)
+                Text("완료 \(store.completedItems.count)").tag(1)
+                Text("공지 \(store.announcementItems.count)").tag(2)
+            }.pickerStyle(.segmented).labelsHidden()
 
-            if store.items.isEmpty {
-                VStack(spacing: 4) {
-                    Text(store.status)
-                    Text(store.currentPage).font(.caption)
-                }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 70, alignment: .center)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if store.dueItems.isEmpty {
-                            Text("앞으로 7일 이내 마감 항목이 없습니다.").foregroundStyle(.secondary)
-                        }
-                        ForEach(store.dueItems) { item in itemRow(item) }
-                        if !store.announcementItems.isEmpty {
-                            Divider()
-                            Text("최근 공지").font(.subheadline.bold())
-                            ForEach(store.announcementItems) { item in itemRow(item) }
-                        }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if store.lastUpdated == nil {
+                        ProgressView().controlSize(.small)
+                        Text(store.status).foregroundStyle(.secondary)
+                    } else if selected == 0 {
+                        if store.pendingCount == 0 { Text("확인된 할 일이 없습니다.").foregroundStyle(.secondary) }
+                        section("기한 지남 · 최근 30일", items: store.overdueItems)
+                        section("앞으로 7일", items: store.dueItems)
+                        section("그 이후", items: store.futureItems)
+                        section("기한 없음", items: store.undatedItems)
+                    } else if selected == 1 {
+                        Text("최근 30일 · 학교 제출 기록 또는 직접 체크").font(.caption).foregroundStyle(.secondary)
+                        if store.completedItems.isEmpty { Text("확인된 완료 항목이 없습니다.").foregroundStyle(.secondary) }
+                        ForEach(store.completedItems) { itemRow($0) }
+                    } else {
+                        if store.announcementItems.isEmpty { Text("최근 공지가 없습니다.").foregroundStyle(.secondary) }
+                        ForEach(store.announcementItems) { itemRow($0) }
                     }
-                }
-                .frame(maxHeight: 440)
-                Text(store.status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 380)
+            if selected != 2 {
+                Text("직접 체크는 이 앱에만 저장됩니다. 학교 제출·출석에는 반영되지 않습니다.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-
+            Text(store.status).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Divider()
             HStack {
                 Button("학교 연결 / 학기 선택") {
                     if let connect { connect() } else { store.showWindow() }
                 }
                 Spacer()
-                Button("강의실 열기") {
-                    NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!)
-                }
+                Button("강의실 열기") { NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!) }
             }
             HStack {
                 Button("설정…") { store.showSettings() }
                 Button("로그인 정보 지우기") { store.clearLogin() }
                 Spacer()
                 Button("앱 종료") { NSApp.terminate(nil) }
-            }
-            .foregroundStyle(.secondary)
+            }.foregroundStyle(.secondary)
         }
-        .padding(16)
-        .frame(width: 350, alignment: .leading)
+        .padding(16).frame(width: 390, alignment: .leading)
         .onAppear { store.refreshIfNeeded() }
     }
 
+    @ViewBuilder private func section(_ title: String, items: [CampusItem]) -> some View {
+        if !items.isEmpty {
+            Text(title).font(.subheadline.bold())
+            ForEach(items) { itemRow($0) }
+        }
+    }
+
     private func itemRow(_ item: CampusItem) -> some View {
-        Button {
-            if let url = URL(string: item.url), url.host == "khcanvas.khu.ac.kr" {
-                NSWorkspace.shared.open(url)
+        HStack(alignment: .top, spacing: 10) {
+            if item.kind != .announcement {
+                Button { store.toggleCompletion(item) } label: {
+                    Image(systemName: store.isCompleted(item) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(store.isCompleted(item) ? Color.green : Color.secondary)
+                        .font(.title3)
+                }.buttonStyle(.plain).disabled(item.completed)
+                    .accessibilityLabel(item.completed ? "학교에서 \(item.completionLabel ?? "완료")" : "\(item.title) \(store.isCompleted(item) ? "완료 취소" : "완료로 표시")")
+            } else {
+                Image(systemName: item.kind.symbol).foregroundStyle(.blue).frame(width: 18)
             }
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: item.kind.symbol)
-                    .foregroundStyle(item.kind == .announcement ? .blue : .orange)
-                    .frame(width: 18)
+            Button {
+                if let url = URL(string: item.url), url.host == "khcanvas.khu.ac.kr" { NSWorkspace.shared.open(url) }
+            } label: {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.title).lineLimit(2)
+                    Text(item.course).lineLimit(1).font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        Text(item.course).lineLimit(1)
-                        Spacer()
-                        if let date = item.date {
-                            Text(date, format: .dateTime.month().day().hour().minute())
+                        if let date = item.date { Text(date, format: .dateTime.month().day().hour().minute()) }
+                        if store.isCompleted(item) {
+                            Text(item.completed ? item.completionLabel ?? "완료" : "직접 완료").foregroundStyle(.green)
                         }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-            }
-            .contentShape(Rectangle())
+                    }.font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 }
 
@@ -148,7 +155,7 @@ struct CampusWindowContent: View {
         .frame(minWidth: 820, minHeight: 650)
 
         .onChange(of: store.lastUpdated) { _, _ in
-            if !store.dueItems.isEmpty || !store.announcementItems.isEmpty { store.showConnection = false }
+            if !store.items.isEmpty { store.showConnection = false }
         }
     }
 }
@@ -162,6 +169,10 @@ struct CampusSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            Button("메뉴 막대 아이콘 다시 표시") {
+                (NSApp.delegate as? CampusAppDelegate)?.restoreMenuBarIcon()
+            }
+            Divider()
             Text("자동 로그인").font(.title2.bold())
             Text("학교 세션이 만료되면 저장한 계정으로 다시 로그인합니다. ID와 비밀번호는 이 Mac의 키체인에만 보관합니다.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -216,13 +227,15 @@ final class CampusAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         store = CampusStore()
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.autosaveName = "CampusBarStatusItem"
+        statusItem.isVisible = true
         if let button = statusItem.button {
             let icon = NSImage(named: "MenuIcon") ?? NSImage(systemSymbolName: "books.vertical", accessibilityDescription: "CampusBar")!
             icon.size = NSSize(width: 22, height: 15)
             icon.isTemplate = true
             button.image = icon
-            button.imagePosition = .imageLeading
+            button.imagePosition = .imageOnly
             button.target = self
             button.action = #selector(statusClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -235,14 +248,21 @@ final class CampusAppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(true, forKey: "automaticLoginSetupShown")
             store.showSettings()
         }
-        subscription = store.$items.sink { [weak self] _ in
-            Task { @MainActor in self?.statusItem.button?.title = " " + (self?.store.menuTitle ?? "강의실") }
+        subscription = store.$status.sink { [weak self] status in
+            self?.statusItem.button?.toolTip = "CampusBar · \(status) · 클릭: 요약 / 우클릭: 메뉴"
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        restoreMenuBarIcon()
         store?.showWindow(connection: false)
         return true
+    }
+
+    func restoreMenuBarIcon() {
+        statusItem?.length = NSStatusItem.squareLength
+        statusItem?.button?.title = ""
+        statusItem?.isVisible = true
     }
 
     @objc private func statusClicked(_ sender: NSStatusBarButton) {
