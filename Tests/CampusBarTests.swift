@@ -13,6 +13,22 @@ final class CampusBarTests: XCTestCase {
         XCTAssertEqual(restored[0].isHTTPOnly, cookie.isHTTPOnly)
     }
 
+    func testAutoLoginOnlyTargetsSchoolLoginAndStopsAfterFailure() {
+        XCTAssertTrue(AutoLoginPolicy.isLoginPage(URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")))
+        for url in ["http://e-campus.khu.ac.kr/xn-sso/login.php", "https://e-campus.khu.ac.kr.evil.test/xn-sso/login.php", "https://e-campus.khu.ac.kr:444/xn-sso/login.php", "https://khcanvas.khu.ac.kr/xn-sso/login.php", "https://e-campus.khu.ac.kr/index.php"] {
+            XCTAssertFalse(AutoLoginPolicy.isLoginPage(URL(string: url)))
+        }
+        var policy = AutoLoginPolicy()
+        XCTAssertTrue(policy.begin())
+        XCTAssertFalse(policy.begin())
+        policy.fail()
+        XCTAssertFalse(policy.begin())
+        var restored = AutoLoginPolicy(paused: true)
+        XCTAssertFalse(restored.begin())
+        policy.reset()
+        XCTAssertTrue(policy.begin())
+    }
+
     func testDatesAndInvalidItems() {
         let local = RawCampusItem.parseDate("2026.10.01 23:59")
         let iso = RawCampusItem.parseDate("2026-10-01T14:59:00Z")

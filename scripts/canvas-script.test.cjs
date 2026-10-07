@@ -58,3 +58,30 @@ test('collects LearningX videos after DOM changes without waiting for a visible 
   assert.equal(payload.items[0].kind, 'video');
   assert.equal(payload.items[0].date, '2026.10.01 23:59');
 });
+
+const loginScript = scripts.match(/static let autoLogin = #"""([\s\S]*?)"""#/)[1];
+function loginFixture({origin = 'https://e-campus.khu.ac.kr', action = '', challenge = false, frame = false} = {}) {
+  let submitted = 0;
+  const form = {method: 'post', getAttribute: () => action};
+  const id = {form, value: ''}, passwordField = {form, type: 'password', value: ''};
+  const window = {OnLogon: () => submitted++};
+  window.top = frame ? {} : window;
+  const context = {window, URL, username: 'fixture-user', password: "quotes'\"\\and newline\n", location: {origin, pathname: '/xn-sso/login.php', href: origin + '/xn-sso/login.php'},
+    document: {querySelector: selector => ({'form#form1': form, '#login_user_id': id, '#login_user_password': passwordField, '#login_form1_csrf_token': {}}[selector] ?? (challenge ? {} : null))}};
+  const result = vm.runInNewContext(`(function(){${loginScript}})()`, context);
+  return {result, submitted, id, passwordField, expected: context.password};
+}
+test('automatic login submits the observed school form with literal credentials', () => {
+  const fixture = loginFixture();
+  assert.equal(fixture.result, true);
+  assert.equal(fixture.submitted, 1);
+  assert.equal(fixture.passwordField.value, fixture.expected);
+});
+test('automatic login refuses other origins, frames, redirected forms and challenges', () => {
+  for (const options of [{origin:'https://evil.test'}, {action:'https://evil.test/login'}, {challenge:true}, {frame:true}]) {
+    const fixture = loginFixture(options);
+    assert.equal(fixture.result, false);
+    assert.equal(fixture.submitted, 0);
+    assert.equal(fixture.passwordField.value, '');
+  }
+});

@@ -1,4 +1,24 @@
 enum CampusScripts {
+    // Arguments arrive through WKWebView's structured API, never JS interpolation.
+    static let autoLogin = #"""
+    if (window.top !== window || location.origin !== 'https://e-campus.khu.ac.kr'
+        || location.pathname !== '/xn-sso/login.php') return false;
+    const form = document.querySelector('form#form1');
+    const id = document.querySelector('#login_user_id');
+    const passwordField = document.querySelector('#login_user_password');
+    const action = form && new URL(form.getAttribute('action') || location.href, location.href);
+    if (!form || !id || !passwordField || id.form !== form || passwordField.form !== form
+        || passwordField.type !== 'password' || form.method.toLowerCase() !== 'post'
+        || action.origin !== location.origin || action.pathname !== location.pathname
+        || typeof window.OnLogon !== 'function'
+        || !document.querySelector('#login_form1_csrf_token')
+        || document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], input[autocomplete="one-time-code"]')) return false;
+    id.value = username;
+    passwordField.value = password;
+    window.OnLogon();
+    return true;
+    """#
+
     static let canvas = #"""
     (async () => {
       try {

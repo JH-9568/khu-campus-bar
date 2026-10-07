@@ -1,6 +1,16 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+if pgrep -x CampusBar >/dev/null; then
+    printf '%s\n' 'Quit CampusBar before rebuilding to preserve its Keychain identity.' >&2
+    exit 1
+else
+    result=$?
+    if [ "$result" -ne 1 ]; then
+        printf '%s\n' 'Cannot verify whether CampusBar is running; build stopped.' >&2
+        exit 1
+    fi
+fi
 mkdir -p .build/ModuleCache
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache"

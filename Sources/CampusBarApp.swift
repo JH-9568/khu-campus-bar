@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WebKit
+import Combine
 
 struct LoginView: NSViewRepresentable {
     let webView: WKWebView
@@ -63,6 +64,7 @@ struct MenuContent: View {
                 }
             }
             HStack {
+                Button("설정…") { store.showSettings() }
                 Button("로그인 정보 지우기") { store.clearLogin() }
                 Spacer()
                 Button("앱 종료") { NSApp.terminate(nil) }
@@ -105,26 +107,25 @@ struct MenuContent: View {
 
 struct CampusWindowContent: View {
     @ObservedObject var store: CampusStore
-    @State private var showConnection = true
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("CampusBar").font(.headline)
                 Spacer()
-                Button("요약") { showConnection = false }
-                Button("학교 연결 / 학기 선택") { showConnection = true }
+                Button("요약") { store.showConnection = false }
+                Button("학교 연결 / 학기 선택") { store.showConnection = true }
             }
             .padding(12)
             Divider()
             ZStack {
                 LoginView(webView: store.webView)
-                    .opacity(showConnection ? 1 : 0)
-                    .allowsHitTesting(showConnection)
-                    .accessibilityHidden(!showConnection)
-                if !showConnection {
+                    .opacity(store.showConnection ? 1 : 0)
+                    .allowsHitTesting(store.showConnection)
+                    .accessibilityHidden(!store.showConnection)
+                if !store.showConnection {
                     VStack {
-                        MenuContent(store: store, connect: { showConnection = true })
+                        MenuContent(store: store, connect: { store.showConnection = true })
                         Spacer(minLength: 0)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -135,7 +136,7 @@ struct CampusWindowContent: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(store.status)
-                    if showConnection {
+                    if store.showConnection {
                         Text("현재: \(store.currentPage)").font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -145,31 +146,139 @@ struct CampusWindowContent: View {
             .padding(10)
         }
         .frame(minWidth: 820, minHeight: 650)
-        .onAppear { showConnection = store.lastUpdated == nil }
+
         .onChange(of: store.lastUpdated) { _, _ in
-            if !store.dueItems.isEmpty || !store.announcementItems.isEmpty { showConnection = false }
+            if !store.dueItems.isEmpty || !store.announcementItems.isEmpty { store.showConnection = false }
         }
     }
 }
 
+struct CampusSettingsView: View {
+    @ObservedObject var store: CampusStore
+    @State private var username = ""
+    @State private var password = ""
+    @State private var saving = false
+    @State private var message = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("자동 로그인").font(.title2.bold())
+            Text("학교 세션이 만료되면 저장한 계정으로 다시 로그인합니다. ID와 비밀번호는 이 Mac의 키체인에만 보관합니다.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            TextField("학교 ID 또는 학번", text: $username).textFieldStyle(.roundedBorder)
+            SecureField("학교 비밀번호", text: $password).textFieldStyle(.roundedBorder)
+            Text(store.automaticLoginPaused ? "자동 로그인 일시 중지 · 정보를 확인하고 다시 저장해 주세요" : store.automaticLoginEnabled ? "자동 로그인 켜짐" : "자동 로그인 꺼짐")
+                .font(.caption).foregroundStyle(.secondary)
+            if !message.isEmpty { Text(message).font(.caption).fixedSize(horizontal: false, vertical: true) }
+            HStack {
+                Button("저장 정보 삭제 · 끄기") {
+                    saving = true
+                    Task {
+                        do { try await store.disableAutomaticLogin(); message = "자동 로그인 정보를 삭제했습니다." }
+                        catch { message = error.localizedDescription }
+                        saving = false
+                    }
+                }.disabled(saving || !store.automaticLoginEnabled)
+                Spacer()
+                Button("저장하고 연결") {
+                    saving = true
+                    Task {
+                        do {
+                            try await store.saveAutomaticLogin(username: username, password: password)
+                            username = ""; password = ""
+                            message = "키체인에 저장했습니다. 학교 연결 상태를 확인합니다."
+                        } catch { message = error.localizedDescription }
+                        saving = false
+                    }
+                }.buttonStyle(.borderedProminent).disabled(saving || username.isEmpty || password.isEmpty)
+            }
+            Text("비밀번호 오류나 추가 인증이 나오면 자동 재시도를 멈춥니다.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(24).frame(width: 460)
+    }
+}
+
+@MainActor
+final class CampusAppDelegate: NSObject, NSApplicationDelegate {
+    private var store: CampusStore!
+    private var statusItem: NSStatusItem!
+    private let popover = NSPopover()
+    private var subscription: AnyCancellable?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if let other = NSRunningApplication.runningApplications(withBundleIdentifier: "com.jh9568.CampusBar")
+            .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+            other.activate(options: [.activateAllWindows])
+            NSApp.terminate(nil)
+            return
+        }
+        store = CampusStore()
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem.button {
+            let icon = NSImage(named: "MenuIcon") ?? NSImage(systemSymbolName: "books.vertical", accessibilityDescription: "CampusBar")!
+            icon.size = NSSize(width: 22, height: 15)
+            icon.isTemplate = true
+            button.image = icon
+            button.imagePosition = .imageLeading
+            button.target = self
+            button.action = #selector(statusClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.setAccessibilityLabel("CampusBar")
+            button.toolTip = "CampusBar · 클릭: 요약 / 우클릭: 메뉴"
+        }
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: MenuContent(store: store))
+        if !UserDefaults.standard.bool(forKey: "automaticLoginSetupShown") {
+            UserDefaults.standard.set(true, forKey: "automaticLoginSetupShown")
+            store.showSettings()
+        }
+        subscription = store.$items.sink { [weak self] _ in
+            Task { @MainActor in self?.statusItem.button?.title = " " + (self?.store.menuTitle ?? "강의실") }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        store?.showWindow(connection: false)
+        return true
+    }
+
+    @objc private func statusClicked(_ sender: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp || NSApp.currentEvent?.modifierFlags.contains(.control) == true {
+            popover.performClose(nil)
+            let menu = NSMenu()
+            add("요약 창 열기", action: #selector(openSummary), to: menu)
+            add("학교 연결 / 학기 선택…", action: #selector(openConnection), to: menu)
+            menu.addItem(.separator())
+            add("새로고침", action: #selector(refresh), to: menu)
+            add("설정…", action: #selector(settings), to: menu)
+            menu.addItem(.separator())
+            add("강의실 웹사이트 열기", action: #selector(openClassroom), to: menu)
+            menu.addItem(.separator())
+            add("CampusBar 종료", action: #selector(quit), to: menu)
+            statusItem.menu = menu
+            sender.performClick(nil)
+            statusItem.menu = nil
+        } else if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+        }
+    }
+    private func add(_ title: String, action: Selector, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+    }
+    @objc private func openSummary() { store.showWindow(connection: false) }
+    @objc private func openConnection() { store.showWindow() }
+    @objc private func refresh() { store.refresh() }
+    @objc private func settings() { store.showSettings() }
+    @objc private func openClassroom() { NSWorkspace.shared.open(URL(string: "https://khcanvas.khu.ac.kr/")!) }
+    @objc private func quit() { NSApp.terminate(nil) }
+}
+
 @main
 struct CampusBarApp: App {
-    @StateObject private var store = CampusStore()
-
-    var body: some Scene {
-        MenuBarExtra {
-            MenuContent(store: store)
-        } label: {
-            Label {
-                Text(store.menuTitle)
-            } icon: {
-                Image(nsImage: NSImage(named: "MenuIcon") ?? NSImage(systemSymbolName: "books.vertical", accessibilityDescription: nil)!)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 22, height: 15)
-            }
-        }
-        .menuBarExtraStyle(.window)
-    }
+    @NSApplicationDelegateAdaptor(CampusAppDelegate.self) private var delegate
+    var body: some Scene { Settings { EmptyView() } }
 }
