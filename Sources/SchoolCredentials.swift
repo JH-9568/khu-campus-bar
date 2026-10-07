@@ -55,6 +55,7 @@ enum LoginError: LocalizedError {
 
 struct AutoLoginPolicy {
     private(set) var attempted = false
+    private(set) var verifiedSession = false
     private(set) var paused: Bool
     init(paused: Bool = false) { self.paused = paused }
     static func isLoginPage(_ url: URL?) -> Bool {
@@ -68,6 +69,11 @@ struct AutoLoginPolicy {
         attempted = true
         return true
     }
+    mutating func beginSessionVerification() -> Bool {
+        guard attempted, !paused, !verifiedSession else { return false }
+        verifiedSession = true
+        return true
+    }
     mutating func fail() { paused = true }
-    mutating func reset() { attempted = false; paused = false }
+    mutating func reset() { attempted = false; verifiedSession = false; paused = false }
 }

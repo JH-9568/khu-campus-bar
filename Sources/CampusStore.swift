@@ -195,9 +195,22 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         }
     }
 
+    private func verifyLoginSession() {
+        guard loginPolicy.beginSessionVerification() else {
+            requireManualLogin(loginFailureNotice ?? "로그인이 확인되지 않았습니다 · 학교 연결 또는 설정에서 정보를 확인해 주세요", pause: true)
+            return
+        }
+        // The school can leave login.php displayed after accepting the POST.
+        // Check the authenticated homepage once; never submit the password again.
+        status = "로그인 제출 완료 · 학교 세션 확인 중…"
+        homepageRedirects = 0
+        openedDashboard = false
+        webView.load(URLRequest(url: homeURL, cachePolicy: .reloadIgnoringLocalCacheData))
+    }
+
     private func handleLoginPage() {
         if loginPolicy.attempted {
-            requireManualLogin(loginFailureNotice ?? "자동 로그인 실패 · 학교 연결에서 직접 로그인하거나 설정에서 정보를 수정해 주세요", pause: true)
+            verifyLoginSession()
             return
         }
         guard automaticLoginEnabled, !loginPolicy.paused else {
@@ -231,12 +244,13 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
                 loginTimeout = Task { @MainActor [weak self] in
                     do { try await Task.sleep(for: .seconds(25)) } catch { return }
                     guard let self, self.authenticating else { return }
-                    self.requireManualLogin("자동 로그인 확인 시간 초과 · 학교 연결에서 확인해 주세요", pause: true)
+                    self.verifyLoginSession()
                 }
             } catch {
                 // A successful redirect may finish before WebKit returns the JS result.
                 guard authenticating else { return }
-                requireManualLogin("자동 로그인 실패 · 키체인 접근 또는 학교 연결을 확인해 주세요", pause: true)
+                if loginPolicy.attempted { verifyLoginSession() }
+                else { requireManualLogin("자동 로그인 실패 · 키체인 접근을 확인해 주세요", pause: true) }
             }
         }
     }
@@ -252,6 +266,19 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         homepageRedirects = 0
         openedDashboard = false
         webView.load(URLRequest(url: homeURL))
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        if navigationAction.targetFrame?.isMainFrame == true,
+           navigationAction.request.httpMethod == "POST",
+           AutoLoginPolicy.isLoginPage(navigationAction.request.url), !authenticating {
+            // A user can sign in manually after an automatic attempt was paused.
+            // Verify that POST too, rather than preserving the previous failure.
+            resetLoginAttempt()
+            _ = loginPolicy.begin()
+            authenticating = true
+        }
+        return .allow
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -271,6 +298,11 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
                 let signedIn = result as? Bool == true
                 self.logger.info("e-Campus signed in: \(signedIn, privacy: .public)")
                 guard signedIn else {
+                    if self.loginPolicy.attempted {
+                        self.requireManualLogin(self.loginFailureNotice ?? "학교 로그인이 완료되지 않았습니다 · 로그인 정보를 확인해 주세요", pause: true)
+                        self.webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")!))
+                        return
+                    }
                     self.status = "학교 세션을 확인하는 중…"
                     self.webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")!))
                     return
@@ -307,7 +339,8 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
         if frame.isMainFrame, AutoLoginPolicy.isLoginPage(frame.request.url) {
             loginFailureNotice = "학교 로그인 안내: " + message
-            requireManualLogin(loginFailureNotice!, pause: true)
+            if authenticating { status = loginFailureNotice! }
+            else { requireManualLogin(loginFailureNotice!, pause: true) }
         } else {
             showWindow()
             let alert = NSAlert()

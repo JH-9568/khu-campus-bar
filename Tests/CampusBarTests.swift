@@ -29,6 +29,21 @@ final class CampusBarTests: XCTestCase {
         XCTAssertTrue(policy.begin())
     }
 
+    func testReturnedLoginPageVerifiesSessionOnceWithoutResubmittingPassword() {
+        var policy = AutoLoginPolicy()
+        XCTAssertFalse(policy.beginSessionVerification())
+        XCTAssertTrue(policy.begin())
+        XCTAssertTrue(policy.beginSessionVerification())
+        XCTAssertFalse(policy.paused, "Returning to login.php is not proof of failure")
+        XCTAssertFalse(policy.begin(), "Session verification must not resubmit credentials")
+        XCTAssertFalse(policy.beginSessionVerification(), "Do not loop between home and login")
+        policy.fail()
+        XCTAssertFalse(policy.beginSessionVerification())
+        policy.reset()
+        XCTAssertTrue(policy.begin())
+        XCTAssertTrue(policy.beginSessionVerification())
+    }
+
     func testDatesAndInvalidItems() {
         let local = RawCampusItem.parseDate("2026.10.01 23:59")
         let iso = RawCampusItem.parseDate("2026-10-01T14:59:00Z")
