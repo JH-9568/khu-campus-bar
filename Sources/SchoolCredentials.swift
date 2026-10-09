@@ -54,6 +54,9 @@ enum LoginError: LocalizedError {
 }
 
 struct AutoLoginPolicy {
+    // /login supplies the school's SSO return_url and callback chain.
+    // Direct GETs to /xn-sso/login.php render a form without that context.
+    static let entryURL = URL(string: "https://e-campus.khu.ac.kr/login")!
     private(set) var attempted = false
     private(set) var verifiedSession = false
     private(set) var paused: Bool

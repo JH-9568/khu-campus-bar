@@ -207,7 +207,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         promptedLogin = false
         status = "저장된 계정으로 로그인 확인 중…"
         showWindow()
-        webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")!))
+        webView.load(URLRequest(url: AutoLoginPolicy.entryURL, cachePolicy: .reloadIgnoringLocalCacheData))
     }
 
     func disableAutomaticLogin() async throws {
@@ -244,21 +244,39 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     }
 
     private func verifyLoginSession() {
-        guard loginPolicy.beginSessionVerification() else {
-            requireManualLogin(loginFailureNotice ?? "로그인이 확인되지 않았습니다 · 학교 연결 또는 설정에서 정보를 확인해 주세요", pause: true)
-            return
-        }
-        // The school can leave login.php displayed after accepting the POST.
-        // Check the authenticated homepage once; never submit the password again.
+        guard authenticating, loginPolicy.beginSessionVerification() else { return }
         status = "로그인 제출 완료 · 학교 세션 확인 중…"
         homepageRedirects = 0
         openedDashboard = false
-        webView.load(URLRequest(url: homeURL, cachePolicy: .reloadIgnoringLocalCacheData))
+        webView.load(URLRequest(url: classroomURL, cachePolicy: .reloadIgnoringLocalCacheData))
+    }
+
+    private func scheduleLoginVerification() {
+        loginTimeout?.cancel()
+        loginTimeout = Task { @MainActor [weak self] in
+            // Allow the school's response scripts and SSO redirects to finish.
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard let self, self.authenticating else { return }
+            if !self.webView.isLoading, AutoLoginPolicy.isLoginPage(self.webView.url) {
+                self.verifyLoginSession()
+            }
+            do { try await Task.sleep(for: .seconds(25)) } catch { return }
+            guard self.authenticating else { return }
+            self.requireManualLogin("학교 로그인 연결 시간이 초과됐습니다 · 학교 연결 화면을 확인해 주세요", pause: true)
+        }
     }
 
     private func handleLoginPage() {
+        if loginPolicy.paused {
+            requireManualLogin(loginFailureNotice ?? "자동 로그인 일시 중지 · 설정에서 저장된 정보로 다시 로그인해 주세요")
+            return
+        }
         if loginPolicy.attempted {
-            verifyLoginSession()
+            if loginPolicy.verifiedSession {
+                requireManualLogin(loginFailureNotice ?? "학교가 로그인을 완료하지 못했습니다 · 로그인 화면의 안내를 확인해 주세요", pause: true)
+            } else {
+                scheduleLoginVerification()
+            }
             return
         }
         guard automaticLoginEnabled, !loginPolicy.paused else {
@@ -266,9 +284,11 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
             return
         }
         guard !authenticating else { return }
+        homepageRedirects = 0
         authenticating = true
         Task { @MainActor in
             do {
+                status = "키체인에서 저장된 계정 확인 중…"
                 guard let login = try await SchoolCredentials.shared.load() else {
                     requireManualLogin("저장된 로그인 정보가 없습니다 · 설정에서 등록해 주세요")
                     return
@@ -284,20 +304,20 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
                 let submitted = try await webView.callAsyncJavaScript(CampusScripts.autoLogin,
                     arguments: ["username": login.username, "password": login.password], in: nil, contentWorld: .page)
                 logger.info("Automatic login: form accepted \(submitted as? Bool == true, privacy: .public)")
+                if submitted as? String == "missing-csrf" {
+                    requireManualLogin("학교 로그인 보안 쿠키가 없습니다 · 학교 연결에서 페이지를 다시 열어 주세요", pause: true)
+                    return
+                }
                 guard submitted as? Bool == true else {
                     requireManualLogin("로그인 화면 변경 또는 추가 인증 · 학교 연결에서 확인해 주세요", pause: true)
                     return
                 }
                 guard loginPolicy.attempted, !loginPolicy.paused else { return }
-                loginTimeout = Task { @MainActor [weak self] in
-                    do { try await Task.sleep(for: .seconds(25)) } catch { return }
-                    guard let self, self.authenticating else { return }
-                    self.verifyLoginSession()
-                }
+                scheduleLoginVerification()
             } catch {
                 // A successful redirect may finish before WebKit returns the JS result.
                 guard authenticating else { return }
-                if loginPolicy.attempted { verifyLoginSession() }
+                if loginPolicy.attempted { scheduleLoginVerification() }
                 else { requireManualLogin("자동 로그인 실패 · 키체인 접근을 확인해 주세요", pause: true) }
             }
         }
@@ -335,43 +355,39 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
             logger.info("Loaded \(self.currentPage, privacy: .public)")
         }
         if AutoLoginPolicy.isLoginPage(webView.url) {
+            webView.evaluateJavaScript(CampusScripts.loginDiagnostics) { [weak self] result, _ in
+                if let value = result as? String { self?.logger.info("Login page structure: \(value, privacy: .public)") }
+            }
             handleLoginPage()
             return
         }
         if webView.url?.host == "e-campus.khu.ac.kr",
            ["/", "/index.php"].contains(webView.url?.path ?? "") {
-            let loadedURL = webView.url
-            webView.evaluateJavaScript("Boolean(document.querySelector('button[title=\"사용자 메뉴\"]'))") { [weak self] result, _ in
-                guard let self, self.webView.url == loadedURL else { return }
-                let signedIn = result as? Bool == true
-                self.logger.info("e-Campus signed in: \(signedIn, privacy: .public)")
-                guard signedIn else {
-                    if self.loginPolicy.attempted {
-                        self.requireManualLogin(self.loginFailureNotice ?? "학교 로그인이 완료되지 않았습니다 · 로그인 정보를 확인해 주세요", pause: true)
-                        self.webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")!))
-                        return
-                    }
-                    self.status = "학교 세션을 확인하는 중…"
-                    self.webView.load(URLRequest(url: URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")!))
-                    return
-                }
-                self.resetLoginAttempt()
-                self.needsManualLogin = false
-                self.promptedLogin = false
-                guard self.homepageRedirects < 2 else {
-                    self.status = "학교 로그인 완료 · Canvas 연결 실패"
-                    return
-                }
-                self.homepageRedirects += 1
-                self.status = "로그인 완료 · 강의실로 이동 중…"
-                self.webView.load(URLRequest(url: self.classroomURL))
+            // The homepage header is rendered asynchronously. Let the school's
+            // authenticated classroom route decide whether login is needed.
+            guard homepageRedirects < 2 else {
+                requireManualLogin("학교 강의실 연결이 완료되지 않았습니다 · 다시 연결해 주세요", pause: true)
+                return
             }
+            if homepageRedirects == 1, !loginPolicy.attempted {
+                status = "학교 통합 로그인으로 이동 중…"
+                webView.load(URLRequest(url: AutoLoginPolicy.entryURL, cachePolicy: .reloadIgnoringLocalCacheData))
+                return
+            }
+            homepageRedirects += 1
+            status = "학교 강의실 연결 확인 중…"
+            webView.load(URLRequest(url: classroomURL))
             return
         }
+
         guard webView.url?.host == "khcanvas.khu.ac.kr" else {
             status = "학교 로그인을 마치면 자동으로 정보를 가져옵니다"
             return
         }
+        // Reaching Canvas also confirms SSO, even if the homepage was skipped.
+        resetLoginAttempt()
+        needsManualLogin = false
+        promptedLogin = false
         if webView.url?.path == "/" && !openedDashboard {
             openedDashboard = true
             status = "강의실 연결 완료 · 학습 정보를 읽는 중…"

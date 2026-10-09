@@ -13,10 +13,20 @@ enum CampusScripts {
         || typeof window.OnLogon !== 'function'
         || !document.querySelector('#login_form1_csrf_token')
         || document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], input[autocomplete="one-time-code"]')) return false;
+    if (!document.cookie.split(';').some(c => c.trim().startsWith('xn_sso_csrf_token_for_this_login=')
+        && c.trim().slice('xn_sso_csrf_token_for_this_login='.length).length > 0)) return 'missing-csrf';
     id.value = username;
     passwordField.value = password;
     window.OnLogon();
     return true;
+    """#
+
+    // Only booleans/counts: never inspect input values, cookie values or response text.
+    static let loginDiagnostics = #"""
+    JSON.stringify({form: Boolean(document.querySelector('form#form1')),
+      csrfCookie: document.cookie.split(';').filter(c => c.trim().startsWith('xn_sso_csrf_token_for_this_login=')).length,
+      scripts: document.scripts.length, frames: document.querySelectorAll('iframe').length,
+      refresh: Boolean(document.querySelector('meta[http-equiv="refresh"]'))})
     """#
 
     static let canvas = #"""

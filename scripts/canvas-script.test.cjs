@@ -62,14 +62,14 @@ test('collects LearningX videos after DOM changes without waiting for a visible 
 });
 
 const loginScript = scripts.match(/static let autoLogin = #"""([\s\S]*?)"""#/)[1];
-function loginFixture({origin = 'https://e-campus.khu.ac.kr', action = '', challenge = false, frame = false} = {}) {
+function loginFixture({origin = 'https://e-campus.khu.ac.kr', action = '', challenge = false, frame = false, csrf = true} = {}) {
   let submitted = 0;
   const form = {method: 'post', getAttribute: () => action};
   const id = {form, value: ''}, passwordField = {form, type: 'password', value: ''};
   const window = {OnLogon: () => submitted++};
   window.top = frame ? {} : window;
   const context = {window, URL, username: 'fixture-user', password: "quotes'\"\\and newline\n", location: {origin, pathname: '/xn-sso/login.php', href: origin + '/xn-sso/login.php'},
-    document: {querySelector: selector => ({'form#form1': form, '#login_user_id': id, '#login_user_password': passwordField, '#login_form1_csrf_token': {}}[selector] ?? (challenge ? {} : null))}};
+    document: {cookie: csrf ? 'xn_sso_csrf_token_for_this_login=fixture-token' : '', querySelector: selector => ({'form#form1': form, '#login_user_id': id, '#login_user_password': passwordField, '#login_form1_csrf_token': {}}[selector] ?? (challenge ? {} : null))}};
   const result = vm.runInNewContext(`(function(){${loginScript}})()`, context);
   return {result, submitted, id, passwordField, expected: context.password};
 }
@@ -128,4 +128,17 @@ test('assignment pagination includes completed items beyond the first page', asy
 test('unavailable submission data is reported as a partial failure', async () => {
   const {payload} = await submissionFixture([], {failure: true});
   assert.match(payload.warning, /제출 상태 확인 실패/);
+});
+
+test('automatic login refuses to submit credentials without the school CSRF cookie', () => {
+  const fixture = loginFixture({csrf: false});
+  assert.equal(fixture.result, 'missing-csrf');
+  assert.equal(fixture.submitted, 0);
+  assert.equal(fixture.passwordField.value, '');
+});
+
+test('all app login entry points use the official SSO entry, not the bare form', () => {
+  const store = readFileSync(new URL('../Sources/CampusStore.swift', `file://${__filename}`), 'utf8');
+  assert.equal((store.match(/URLRequest\(url: AutoLoginPolicy.entryURL/g) || []).length, 2);
+  assert.ok(!store.includes('https://e-campus.khu.ac.kr/xn-sso/login.php'));
 });

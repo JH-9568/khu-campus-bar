@@ -14,6 +14,9 @@ final class CampusBarTests: XCTestCase {
     }
 
     func testAutoLoginOnlyTargetsSchoolLoginAndStopsAfterFailure() {
+        XCTAssertEqual(AutoLoginPolicy.entryURL.absoluteString, "https://e-campus.khu.ac.kr/login")
+        XCTAssertFalse(AutoLoginPolicy.isLoginPage(AutoLoginPolicy.entryURL), "Entry must run SSO setup before displaying the form")
+        XCTAssertTrue(AutoLoginPolicy.isLoginPage(URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php?return_url=https%3A%2F%2Fe-campus.khu.ac.kr%2Flogin%2Fcallback")))
         XCTAssertTrue(AutoLoginPolicy.isLoginPage(URL(string: "https://e-campus.khu.ac.kr/xn-sso/login.php")))
         for url in ["http://e-campus.khu.ac.kr/xn-sso/login.php", "https://e-campus.khu.ac.kr.evil.test/xn-sso/login.php", "https://e-campus.khu.ac.kr:444/xn-sso/login.php", "https://khcanvas.khu.ac.kr/xn-sso/login.php", "https://e-campus.khu.ac.kr/index.php"] {
             XCTAssertFalse(AutoLoginPolicy.isLoginPage(URL(string: url)))
