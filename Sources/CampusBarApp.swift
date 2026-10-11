@@ -120,6 +120,8 @@ struct CampusWindowContent: View {
             HStack {
                 Text("CampusBar").font(.headline)
                 Spacer()
+                Button("메뉴 막대에 표시") { store.showMenuBar?() }
+                    .help("화면 위쪽 메뉴 막대에 CampusBar 학교 아이콘을 표시합니다")
                 Button("요약") { store.showConnection = false }
                 Button("학교 연결 / 학기 선택") { store.showConnection = true }
             }
@@ -170,7 +172,7 @@ struct CampusSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Button("메뉴 막대 아이콘 다시 표시") {
-                (NSApp.delegate as? CampusAppDelegate)?.restoreMenuBarIcon()
+                store.showMenuBar?()
             }
             Divider()
             Text("자동 로그인").font(.title2.bold())
@@ -230,6 +232,7 @@ final class CampusAppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.autosaveName = "CampusBarStatusItem"
         statusItem.isVisible = true
+        store.showMenuBar = { [weak self] in self?.restoreMenuBarIcon() }
         if let button = statusItem.button {
             let icon = NSImage(named: "MenuIcon") ?? NSImage(systemSymbolName: "books.vertical", accessibilityDescription: "CampusBar")!
             icon.size = NSSize(width: 22, height: 15)

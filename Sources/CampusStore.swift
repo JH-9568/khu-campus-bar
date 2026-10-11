@@ -15,6 +15,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     @Published var showConnection = true
     @Published private(set) var automaticLoginEnabled = UserDefaults.standard.bool(forKey: "automaticLoginEnabled")
     @Published private(set) var automaticLoginPaused = AutoLoginPolicy.restored(from: UserDefaults.standard.data(forKey: "automaticLoginPolicy")).paused
+    var showMenuBar: (() -> Void)?
     let webView: WKWebView
 
     private let homeURL = URL(string: "https://e-campus.khu.ac.kr/index.php")!
