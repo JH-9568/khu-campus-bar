@@ -47,6 +47,50 @@ final class CampusBarTests: XCTestCase {
         XCTAssertTrue(policy.beginSessionVerification())
     }
 
+    func testExpiredSessionRecoversAfterTransientFailureAndNextDay() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        var policy = AutoLoginPolicy()
+        XCTAssertTrue(policy.begin(now: now))
+        policy.fail(retryable: true, now: now)
+        XCTAssertFalse(policy.paused)
+        XCTAssertFalse(policy.prepareRefresh(userInitiated: false, now: now.addingTimeInterval(299)))
+        XCTAssertTrue(policy.prepareRefresh(userInitiated: false, now: now.addingTimeInterval(300)))
+        XCTAssertTrue(policy.begin(now: now.addingTimeInterval(300)))
+        XCTAssertFalse(policy.begin(now: now.addingTimeInterval(301)))
+        policy.fail(retryable: true, now: now.addingTimeInterval(301))
+        XCTAssertEqual(policy.retryAfter, now.addingTimeInterval(2101))
+        var restored = AutoLoginPolicy.restored(from: policy.savedData)
+        XCTAssertTrue(restored.prepareRefresh(userInitiated: false, now: now.addingTimeInterval(86400)))
+        XCTAssertTrue(restored.begin(now: now.addingTimeInterval(86400)))
+        restored.reset()
+        XCTAssertNil(restored.retryAfter)
+        XCTAssertEqual(restored.transientFailures, 0)
+    }
+
+    func testManualRefreshClearsOnlyTransientCooldownNotRejectedCredentials() {
+        var policy = AutoLoginPolicy()
+        policy.fail(retryable: true)
+        XCTAssertTrue(policy.prepareRefresh(userInitiated: true))
+        XCTAssertTrue(policy.begin())
+        policy.fail()
+        XCTAssertFalse(policy.prepareRefresh(userInitiated: true))
+        XCTAssertFalse(policy.prepareRefresh(userInitiated: false, now: .distantFuture))
+        let restored = AutoLoginPolicy.restored(from: policy.savedData)
+        XCTAssertTrue(restored.paused)
+        XCTAssertFalse(restored.canRetry(at: .distantFuture))
+    }
+
+    func testInterruptedLoginRestartsAfterCooldownWithoutPermanentPause() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        var policy = AutoLoginPolicy()
+        XCTAssertTrue(policy.begin(now: now))
+        var restored = AutoLoginPolicy.restored(from: policy.savedData)
+        XCTAssertFalse(restored.paused)
+        XCTAssertFalse(restored.begin(now: now))
+        XCTAssertTrue(restored.begin(now: now.addingTimeInterval(300)))
+        XCTAssertFalse(restored.begin(now: now.addingTimeInterval(301)))
+    }
+
     func testCompletionPayloadAndSavedSnapshot() throws {
         let json = #"{"items":[{"kind":"assignment","title":"Submitted","course":"Fixture","date":null,"url":"https://khcanvas.khu.ac.kr/courses/1/assignments/2","completed":true,"completionLabel":"제출 완료","completedAt":"2026-10-01T14:59:00Z"},{"kind":"video","title":"Video","course":"Fixture","url":"https://khcanvas.khu.ac.kr/video/1"}]}"#
         let payload = try JSONDecoder().decode(CampusPayload.self, from: Data(json.utf8))

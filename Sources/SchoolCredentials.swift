@@ -53,23 +53,45 @@ enum LoginError: LocalizedError {
     }
 }
 
-struct AutoLoginPolicy {
+struct AutoLoginPolicy: Codable {
     // /login supplies the school's SSO return_url and callback chain.
     // Direct GETs to /xn-sso/login.php render a form without that context.
     static let entryURL = URL(string: "https://e-campus.khu.ac.kr/login")!
     private(set) var attempted = false
     private(set) var verifiedSession = false
     private(set) var paused: Bool
+    private(set) var retryAfter: Date?
+    private(set) var transientFailures = 0
     init(paused: Bool = false) { self.paused = paused }
+
+    static func restored(from data: Data?) -> Self {
+        guard let data, var policy = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
+        // An interrupted process must wait for its cooldown, not remain in-flight forever.
+        policy.attempted = false
+        policy.verifiedSession = false
+        return policy
+    }
+    var savedData: Data? { try? JSONEncoder().encode(self) }
+    func canRetry(at now: Date = Date()) -> Bool { !paused && (retryAfter == nil || retryAfter! <= now) }
+    mutating func prepareRefresh(userInitiated: Bool, now: Date = Date()) -> Bool {
+        guard !paused else { return false }
+        if userInitiated { retryAfter = nil }
+        guard canRetry(at: now) else { return false }
+        attempted = false
+        verifiedSession = false
+        return true
+    }
     static func isLoginPage(_ url: URL?) -> Bool {
         guard let url else { return false }
         return url.scheme == "https" && url.host == "e-campus.khu.ac.kr"
             && (url.port == nil || url.port == 443) && url.path == "/xn-sso/login.php"
             && url.user == nil && url.password == nil
     }
-    mutating func begin() -> Bool {
-        guard !paused, !attempted else { return false }
+    mutating func begin(now: Date = Date()) -> Bool {
+        guard canRetry(at: now), !attempted else { return false }
         attempted = true
+        // Persist a bounded cooldown before submitting, in case the app exits mid-login.
+        retryAfter = now.addingTimeInterval(300)
         return true
     }
     mutating func beginSessionVerification() -> Bool {
@@ -77,6 +99,14 @@ struct AutoLoginPolicy {
         verifiedSession = true
         return true
     }
-    mutating func fail() { paused = true }
-    mutating func reset() { attempted = false; verifiedSession = false; paused = false }
+    mutating func fail(retryable: Bool = false, now: Date = Date()) {
+        attempted = false
+        verifiedSession = false
+        paused = !retryable
+        if retryable {
+            transientFailures += 1
+            retryAfter = now.addingTimeInterval(transientFailures == 1 ? 300 : 1800)
+        } else { retryAfter = nil }
+    }
+    mutating func reset() { self = Self() }
 }

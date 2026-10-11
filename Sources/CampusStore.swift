@@ -14,7 +14,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         .flatMap { try? JSONDecoder().decode([String: CampusItem].self, from: $0) } ?? [:]
     @Published var showConnection = true
     @Published private(set) var automaticLoginEnabled = UserDefaults.standard.bool(forKey: "automaticLoginEnabled")
-    @Published private(set) var automaticLoginPaused = UserDefaults.standard.bool(forKey: "automaticLoginPaused")
+    @Published private(set) var automaticLoginPaused = AutoLoginPolicy.restored(from: UserDefaults.standard.data(forKey: "automaticLoginPolicy")).paused
     let webView: WKWebView
 
     private let homeURL = URL(string: "https://e-campus.khu.ac.kr/index.php")!
@@ -31,11 +31,12 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     private var connectionWindow: NSWindow?
     private var promptedLogin = false
     private var settingsWindow: NSWindow?
-    private var loginPolicy = AutoLoginPolicy(paused: UserDefaults.standard.bool(forKey: "automaticLoginPaused"))
+    private var loginPolicy = AutoLoginPolicy.restored(from: UserDefaults.standard.data(forKey: "automaticLoginPolicy"))
     private var authenticating = false
     private var loginFailureNotice: String?
     private var needsManualLogin = false
     private var loginTimeout: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
     private let logger = Logger(subsystem: "com.jh9568.CampusBar", category: "navigation")
 
     var dueItems: [CampusItem] {
@@ -113,7 +114,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.needsManualLogin else { return }
-                self.refresh()
+                self.refresh(userInitiated: false)
             }
         }
         Task { @MainActor in
@@ -123,8 +124,9 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
             logger.info("Restored \(saved.count) school session cookies")
             cookieStore.add(self)
             restoringSession = false
-            refresh()
+            refresh(userInitiated: false)
         }
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
     }
 
     func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
@@ -203,6 +205,8 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     func reconnectWithSavedLogin() {
         guard automaticLoginEnabled, !authenticating, !restoringSession else { return }
         resetLoginAttempt()
+        homepageRedirects = 0
+        openedDashboard = false
         needsManualLogin = false
         promptedLogin = false
         status = "저장된 계정으로 로그인 확인 중…"
@@ -217,30 +221,60 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         resetLoginAttempt()
     }
 
+    private func persistLoginPolicy() {
+        automaticLoginPaused = loginPolicy.paused
+        UserDefaults.standard.set(loginPolicy.savedData, forKey: "automaticLoginPolicy")
+    }
+
     private func resetLoginAttempt() {
         loginTimeout?.cancel()
+        retryTask?.cancel()
         authenticating = false
         loginPolicy.reset()
         loginFailureNotice = nil
-        automaticLoginPaused = false
-        UserDefaults.standard.set(false, forKey: "automaticLoginPaused")
+        persistLoginPolicy()
     }
 
     private func requireManualLogin(_ message: String, pause: Bool = false) {
         loginTimeout?.cancel()
+        retryTask?.cancel()
         authenticating = false
         needsManualLogin = true
         status = message
         logger.info("Manual login needed; automatic retries paused: \(pause, privacy: .public)")
         if pause {
             loginPolicy.fail()
-            automaticLoginPaused = true
-            UserDefaults.standard.set(true, forKey: "automaticLoginPaused")
+            persistLoginPolicy()
         }
         if !promptedLogin {
             promptedLogin = true
             showWindow()
         }
+    }
+
+    private func retryLoginLater(_ reason: String) {
+        loginTimeout?.cancel()
+        authenticating = false
+        needsManualLogin = false
+        loginPolicy.fail(retryable: true)
+        persistLoginPolicy()
+        status = reason + " · 자동 재연결 대기 중 (새로고침으로 바로 재시도)"
+        logger.info("Automatic login recovery scheduled; failure count \(self.loginPolicy.transientFailures)")
+        scheduleRetry()
+    }
+
+    private func scheduleRetry() {
+        retryTask?.cancel()
+        guard let date = loginPolicy.retryAfter, !loginPolicy.paused else { return }
+        retryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(max(1, date.timeIntervalSinceNow))) } catch { return }
+            self?.refresh(userInitiated: false)
+        }
+    }
+
+    @objc private func didWake() {
+        guard automaticLoginEnabled, !loginPolicy.paused, !authenticating else { return }
+        refresh(userInitiated: false)
     }
 
     private func verifyLoginSession() {
@@ -262,7 +296,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
             }
             do { try await Task.sleep(for: .seconds(25)) } catch { return }
             guard self.authenticating else { return }
-            self.requireManualLogin("학교 로그인 연결 시간이 초과됐습니다 · 학교 연결 화면을 확인해 주세요", pause: true)
+            self.retryLoginLater("학교 로그인 연결 시간 초과")
         }
     }
 
@@ -273,7 +307,8 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
         }
         if loginPolicy.attempted {
             if loginPolicy.verifiedSession {
-                requireManualLogin(loginFailureNotice ?? "학교가 로그인을 완료하지 못했습니다 · 로그인 화면의 안내를 확인해 주세요", pause: true)
+                if let notice = loginFailureNotice { requireManualLogin(notice, pause: true) }
+                else { retryLoginLater("학교 로그인 연결이 완료되지 않았습니다") }
             } else {
                 scheduleLoginVerification()
             }
@@ -284,6 +319,11 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
             return
         }
         guard !authenticating else { return }
+        guard loginPolicy.canRetry() else {
+            status = "자동 재연결 대기 중 · 새로고침하면 바로 재시도합니다"
+            scheduleRetry()
+            return
+        }
         homepageRedirects = 0
         authenticating = true
         Task { @MainActor in
@@ -297,15 +337,14 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
                     authenticating = false
                     return
                 }
-                // If the app exits during authentication, do not retry unattended on every launch.
-                UserDefaults.standard.set(true, forKey: "automaticLoginPaused")
+                persistLoginPolicy()
                 status = "저장된 계정으로 자동 로그인 중…"
                 logger.info("Automatic login: submitting school form")
                 let submitted = try await webView.callAsyncJavaScript(CampusScripts.autoLogin,
                     arguments: ["username": login.username, "password": login.password], in: nil, contentWorld: .page)
                 logger.info("Automatic login: form accepted \(submitted as? Bool == true, privacy: .public)")
                 if submitted as? String == "missing-csrf" {
-                    requireManualLogin("학교 로그인 보안 쿠키가 없습니다 · 학교 연결에서 페이지를 다시 열어 주세요", pause: true)
+                    retryLoginLater("학교 로그인 보안 쿠키 갱신 필요")
                     return
                 }
                 guard submitted as? Bool == true else {
@@ -318,18 +357,28 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
                 // A successful redirect may finish before WebKit returns the JS result.
                 guard authenticating else { return }
                 if loginPolicy.attempted { scheduleLoginVerification() }
-                else { requireManualLogin("자동 로그인 실패 · 키체인 접근을 확인해 주세요", pause: true) }
+                else { retryLoginLater("저장된 계정 접근을 기다리는 중") }
             }
         }
     }
 
     func refreshIfNeeded() {
         guard !needsManualLogin else { return }
-        if lastUpdated.map({ Date().timeIntervalSince($0) < 300 }) != true { refresh() }
+        if lastUpdated.map({ Date().timeIntervalSince($0) < 300 }) != true { refresh(userInitiated: false) }
     }
 
-    func refresh() {
+    func refresh(userInitiated: Bool = true) {
         guard !authenticating, !clearingSession, !restoringSession else { return }
+        if !loginPolicy.paused {
+            guard loginPolicy.prepareRefresh(userInitiated: userInitiated) else {
+                status = "자동 재연결 대기 중 · 새로고침하면 바로 재시도합니다"
+                scheduleRetry()
+                return
+            }
+            retryTask?.cancel()
+            needsManualLogin = false
+            persistLoginPolicy()
+        }
         status = "강의실을 확인하는 중…"
         homepageRedirects = 0
         openedDashboard = false
@@ -366,7 +415,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
             // The homepage header is rendered asynchronously. Let the school's
             // authenticated classroom route decide whether login is needed.
             guard homepageRedirects < 2 else {
-                requireManualLogin("학교 강의실 연결이 완료되지 않았습니다 · 다시 연결해 주세요", pause: true)
+                retryLoginLater("학교 강의실 연결 지연")
                 return
             }
             if homepageRedirects == 1, !loginPolicy.attempted {
@@ -403,8 +452,7 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
         if frame.isMainFrame, AutoLoginPolicy.isLoginPage(frame.request.url) {
             loginFailureNotice = "학교 로그인 안내: " + message
-            if authenticating { status = loginFailureNotice! }
-            else { requireManualLogin(loginFailureNotice!, pause: true) }
+            requireManualLogin(loginFailureNotice!, pause: true)
         } else {
             showWindow()
             let alert = NSAlert()
@@ -419,10 +467,11 @@ final class CampusStore: NSObject, ObservableObject, WKNavigationDelegate, WKUID
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         if (error as NSError).code == NSURLErrorCancelled { return }
         if authenticating {
-            requireManualLogin("로그인 도중 연결 실패 · 학교 연결에서 확인해 주세요", pause: true)
+            retryLoginLater("로그인 도중 네트워크 연결 실패")
             return
         }
-        status = "페이지 연결 실패: \(error.localizedDescription)"
+        if automaticLoginEnabled && !loginPolicy.paused { retryLoginLater("학교 네트워크 연결 실패") }
+        else { status = "페이지 연결 실패: \(error.localizedDescription)" }
         logger.error("Navigation failed: \(error.localizedDescription, privacy: .public)")
     }
 
